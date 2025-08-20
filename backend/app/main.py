@@ -2,11 +2,13 @@ from fastapi import FastAPI, Request
 import uuid
 from app.utils.logger import logger
 from app.routes.logging import router as logging_router
+from app.routes import data
 
 app = FastAPI()
 
 # Include routers
 app.include_router(logging_router, prefix="/api/v1")
+app.include_router(data.router)  # No prefix - endpoints at root level
 
 @app.on_event("startup")
 async def startup_event():
