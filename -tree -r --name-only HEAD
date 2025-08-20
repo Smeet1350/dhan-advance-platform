@@ -1,0 +1,26 @@
+[33mcommit ba8301b2994fcaca84370fbd6c311b1cf6e02fa9[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m
+Author: Smeet1350 <smeetmeshvania@gmail.com>
+Date:   Tue Aug 19 23:21:16 2025 +0530
+
+    feat: add backend + frontend skeletons
+
+app/main.py
+frontend/.gitignore
+frontend/README.md
+frontend/eslint.config.js
+frontend/index.html
+frontend/package-lock.json
+frontend/package.json
+frontend/postcss.config.js
+frontend/public/vite.svg
+frontend/src/App.css
+frontend/src/App.tsx
+frontend/src/assets/react.svg
+frontend/src/index.css
+frontend/src/main.tsx
+frontend/src/vite-env.d.ts
+frontend/tailwind.config.js
+frontend/tsconfig.app.json
+frontend/tsconfig.json
+frontend/tsconfig.node.json
+frontend/vite.config.ts

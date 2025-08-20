@@ -6,3 +6,7 @@ def success(data, trace_id=None):
 
 def error(code, message, details=None, trace_id=None):
     return {"ok": False, "error": {"code": code, "message": message, "details": details}, "trace_id": trace_id or str(uuid.uuid4())}
+
+def get_trace_id(request: Request):
+    """Get trace_id from request state if available"""
+    return getattr(request.state, 'trace_id', None)
