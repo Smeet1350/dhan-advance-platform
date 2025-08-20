@@ -4,6 +4,7 @@ import uuid
 from app.utils.logger import logger
 from app.routes.logging import router as logging_router
 from app.routes import data
+from app.ws import live
 
 app = FastAPI()
 
@@ -19,6 +20,7 @@ app.add_middleware(
 # Include routers
 app.include_router(logging_router, prefix="/api/v1")
 app.include_router(data.router)  # No prefix - endpoints at root level
+app.include_router(live.router)  # WebSocket for real-time updates
 
 @app.on_event("startup")
 async def startup_event():
