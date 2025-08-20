@@ -1,5 +1,6 @@
 import axios from "axios";
 import { API_BASE } from "../config";
+import { logApiError } from "../services/errorLogger";
 
 console.log("API Client initialized with baseURL:", API_BASE);
 
@@ -46,11 +47,22 @@ api.interceptors.response.use(
     return response;
   },
   (error) => {
+    const traceId = error.config?.headers?.["X-Trace-ID"];
+    
+    // Log error to error logger
+    logApiError(
+      `API Error: ${error.message}`,
+      error,
+      traceId,
+      'API Client'
+    );
+    
     console.error("API Response Error:", {
       url: error.config?.url,
       status: error.response?.status,
       message: error.message,
-      data: error.response?.data
+      data: error.response?.data,
+      traceId
     });
     
     // Handle common error scenarios

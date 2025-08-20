@@ -24,6 +24,11 @@ export default function WebSocketStatus() {
         setLastMessage(message);
         console.log('📥 WebSocket message received:', message);
         
+        // Dispatch message update for debug panel
+        window.dispatchEvent(new CustomEvent('ws-status-update', {
+          detail: { status: connectionStatus, message }
+        }));
+        
         // Handle different message types
         if (message.event === 'ping') {
           console.log('🔄 Ping received');
@@ -37,6 +42,11 @@ export default function WebSocketStatus() {
         setConnectionStatus('connected');
         console.log('🔌 WebSocket connected');
         
+        // Dispatch status update for debug panel
+        window.dispatchEvent(new CustomEvent('ws-status-update', {
+          detail: { status: 'connected', message: null }
+        }));
+        
         // Subscribe to channels
         websocket.send(JSON.stringify({
           type: 'subscribe',
@@ -48,11 +58,21 @@ export default function WebSocketStatus() {
         setIsConnected(false);
         setConnectionStatus('disconnected');
         console.log('🔌 WebSocket disconnected');
+        
+        // Dispatch status update for debug panel
+        window.dispatchEvent(new CustomEvent('ws-status-update', {
+          detail: { status: 'disconnected', message: null }
+        }));
       };
       
       websocket.onerror = (error) => {
         console.error('❌ WebSocket error:', error);
         setConnectionStatus('disconnected');
+        
+        // Dispatch status update for debug panel
+        window.dispatchEvent(new CustomEvent('ws-status-update', {
+          detail: { status: 'disconnected', message: null }
+        }));
       };
       
       setWs(websocket);
