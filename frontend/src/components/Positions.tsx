@@ -1,26 +1,52 @@
-import { useState } from "react";
-import { useApiQuery, queryKeys } from "../api";
-import { api } from "../api";
+import React, { useEffect, useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { usePositions, useWebSocket } from '../api';
+import { DataMerger } from '../api/merge';
+import type { Position } from '../api';
+import type { PositionsDelta } from '../api/merge';
 
-export default function Positions() {
-  const [squareOffStatus, setSquareOffStatus] = useState<{[key: string]: 'idle' | 'loading' | 'success' | 'error'}>({});
-  const [squareOffMessage, setSquareOffMessage] = useState<{[key: string]: string}>({});
-  const [confirmDialog, setConfirmDialog] = useState<{show: boolean, positionId: string, symbol: string} | null>(null);
-  
-  const { data, isLoading, error, refetch } = useApiQuery(
-    queryKeys.positions,
-    "/positions"
-  );
+const Positions: React.FC = () => {
+  const { data: positionsData, isLoading, error, refetch } = usePositions();
+  const [livePositions, setLivePositions] = useState<Position[]>([]);
+  const [lastSequence, setLastSequence] = useState(0);
 
-  console.log("Positions component render:", { data, isLoading, error });
+  const { connectionState, sendResume } = useWebSocket((message) => {
+    if (message.type === 'positions.delta') {
+      const update = message as PositionsDelta;
+      if (update.seq > lastSequence) {
+        if (livePositions.length > 0) {
+          const updated = DataMerger.mergePositions(livePositions, update);
+          setLivePositions(updated);
+        } else if (positionsData) {
+          const updated = DataMerger.mergePositions(positionsData, update);
+          setLivePositions(updated);
+        }
+        setLastSequence(update.seq);
+      }
+    }
+  });
+
+  useEffect(() => {
+    if (positionsData && livePositions.length === 0) {
+      setLivePositions(positionsData);
+    }
+  }, [positionsData, livePositions]);
+
+  useEffect(() => {
+    if (connectionState === 'connected' && lastSequence > 0) {
+      sendResume(lastSequence);
+    }
+  }, [connectionState, lastSequence, sendResume]);
+
+  const displayData = livePositions.length > 0 ? livePositions : positionsData;
 
   if (isLoading) {
     return (
-      <div className="bg-gray-800 rounded-lg p-6">
-        <h2 className="text-2xl font-semibold mb-4">Current Positions</h2>
-        <div className="animate-pulse">
-          <div className="h-4 bg-gray-700 rounded w-3/4 mb-2"></div>
-          <div className="h-4 bg-gray-700 rounded w-1/2"></div>
+      <div className="relative bg-white/10 backdrop-blur-xl rounded-3xl shadow-2xl p-8 border border-white/20 overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-r from-green-500/5 to-blue-500/5"></div>
+        <div className="relative animate-pulse">
+          <div className="h-8 bg-white/20 rounded-2xl mb-6 w-1/3"></div>
+          <div className="h-96 bg-white/20 rounded-2xl"></div>
         </div>
       </div>
     );
@@ -28,229 +54,176 @@ export default function Positions() {
 
   if (error) {
     return (
-      <div className="bg-gray-800 rounded-lg p-6">
-        <h2 className="text-2xl font-semibold mb-4">Current Positions</h2>
-        <div className="text-red-400">Error loading positions: {error.message}</div>
+      <div className="relative bg-white/10 backdrop-blur-xl rounded-3xl shadow-2xl p-8 border border-white/20 overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-r from-red-500/5 to-pink-500/5"></div>
+        <div className="relative text-center">
+          <div className="w-20 h-20 bg-gradient-to-br from-red-500 to-pink-600 rounded-full flex items-center justify-center mx-auto mb-6 shadow-lg">
+            <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+            </svg>
+          </div>
+          <h3 className="text-2xl font-bold text-white mb-3">Error Loading Positions</h3>
+          <p className="text-blue-200 mb-6">{error.message}</p>
+          <button
+            onClick={() => refetch()}
+            className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white px-8 py-3 rounded-2xl transition-all duration-300 shadow-lg hover:shadow-xl transform hover:scale-105"
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }
 
-  // Safely extract positions data
-  const positionsData = data?.data?.data;
-  console.log("Positions data received:", positionsData);
-  
-  // Ensure positions is an array
-  let positions = Array.isArray(positionsData) ? positionsData : [];
-  
-  // TESTING: Add mock position for demonstration if no real positions exist
-  if (positions.length === 0) {
-    console.log("🔧 Adding mock position for testing square-off functionality");
-    positions = [
-      {
-        id: "TEST_POS_001",
-        tradingSymbol: "RELIANCE",
-        buyOrSell: "BUY",
-        netQty: 100,
-        averagePrice: 2500.50,
-        lastTradedPrice: 2520.00,
-        positionId: "TEST_POS_001"
-      }
-    ];
+  if (!displayData || displayData.length === 0) {
+    return (
+      <div className="relative bg-white/10 backdrop-blur-xl rounded-3xl shadow-2xl p-8 border border-white/20 overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-r from-gray-500/5 to-blue-500/5"></div>
+        <div className="relative text-center">
+          <div className="w-20 h-20 bg-gradient-to-br from-gray-500 to-blue-600 rounded-full flex items-center justify-center mx-auto mb-6 shadow-lg">
+            <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+            </svg>
+          </div>
+          <h3 className="text-2xl font-bold text-white mb-3">No Open Positions</h3>
+          <p className="text-blue-200">Start trading to see your current positions.</p>
+        </div>
+      </div>
+    );
   }
 
-  const handleSquareOff = async (positionId: string, symbol: string) => {
-    // Show confirmation dialog first
-    setConfirmDialog({ show: true, positionId, symbol });
+  const formatCurrency = (value: number) => {
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(value);
   };
 
-  const confirmSquareOff = async () => {
-    if (!confirmDialog) return;
-    
-    const { positionId, symbol } = confirmDialog;
-    
-    try {
-      setSquareOffStatus(prev => ({ ...prev, [positionId]: 'loading' }));
-      setSquareOffMessage(prev => ({ ...prev, [positionId]: 'Squaring off position...' }));
-      
-      console.log(`🚨🚨 CONFIRMED: Squaring off position: ${positionId} (${symbol})`);
-      
-      const response = await api.post(`/actions/squareoff/${positionId}/confirm`);
-      
-      if (response.data.ok) {
-        setSquareOffStatus(prev => ({ ...prev, [positionId]: 'success' }));
-        setSquareOffMessage(prev => ({ ...prev, [positionId]: `✅✅ ${response.data.data.message}` }));
-        
-        console.log(`✅✅ Square-off confirmed and successful for position ${positionId}:`, response.data);
-        
-        // Refresh positions data after successful square-off
-        setTimeout(() => {
-          refetch();
-          setSquareOffStatus(prev => ({ ...prev, [positionId]: 'idle' }));
-          setSquareOffMessage(prev => ({ ...prev, [positionId]: '' }));
-        }, 3000);
-        
-      } else {
-        throw new Error(response.data.error?.message || 'Square-off failed');
-      }
-      
-    } catch (error: any) {
-      console.error(`❌❌ Square-off error for position ${positionId}:`, error);
-      
-      setSquareOffStatus(prev => ({ ...prev, [positionId]: 'error' }));
-      setSquareOffMessage(prev => ({ 
-        ...prev, 
-        [positionId]: `❌❌ ${error.response?.data?.error?.message || error.message || 'Square-off failed'}` 
-      }));
-      
-      // Reset error status after 5 seconds
-      setTimeout(() => {
-        setSquareOffStatus(prev => ({ ...prev, [positionId]: 'idle' }));
-        setSquareOffMessage(prev => ({ ...prev, [positionId]: '' }));
-      }, 5000);
-    } finally {
-      setConfirmDialog(null);
-    }
+  const getPnLColor = (value: number) => {
+    if (value > 0) return 'text-green-400';
+    if (value < 0) return 'text-red-400';
+    return 'text-blue-200';
   };
+
+  const getSideColor = (side: string) => {
+    return side === 'LONG' 
+      ? 'bg-green-500/20 text-green-300 border-green-400/40' 
+      : 'bg-red-500/20 text-red-300 border-red-400/40';
+  };
+
+  const totalUnrealizedPnL = displayData.reduce((sum, pos) => sum + (pos.unrealized || 0), 0);
+  const totalQuantity = displayData.reduce((sum, pos) => sum + pos.qty, 0);
+  const longPositions = displayData.filter(pos => pos.side === 'LONG').length;
+  const shortPositions = displayData.filter(pos => pos.side === 'SHORT').length;
 
   return (
-    <div className="bg-gray-800 rounded-lg p-6">
-      <h2 className="text-2xl font-semibold mb-4">Current Positions</h2>
+    <div className="relative bg-white/10 backdrop-blur-xl rounded-3xl shadow-2xl border border-white/20 overflow-hidden">
+      {/* Animated Background */}
+      <div className="absolute inset-0 bg-gradient-to-r from-green-500/5 via-blue-500/5 to-purple-500/5"></div>
       
-      {/* TESTING: Show test mode indicator */}
-      {positions.length > 0 && positions[0]?.id === "TEST_POS_001" && (
-        <div className="mb-4 p-3 bg-yellow-900 border border-yellow-600 rounded-lg">
-          <div className="flex items-center">
-            <span className="text-yellow-400 text-lg mr-2">🧪</span>
-            <span className="text-yellow-200 text-sm">
-              <strong>Test Mode:</strong> Showing mock position for square-off testing. 
-              Click the 🚨 Square Off button to test the functionality.
-            </span>
+      {/* Header with Summary Stats */}
+      <div className="relative bg-gradient-to-r from-white/20 to-white/10 px-8 py-6 border-b border-white/20">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between space-y-4 lg:space-y-0">
+          <div>
+            <h2 className="text-3xl font-bold text-white mb-2">Current Positions</h2>
+            <p className="text-blue-200">
+              {displayData.length} active position{displayData.length !== 1 ? 's' : ''} • Real-time updates
+            </p>
           </div>
-        </div>
-      )}
-      
-      {positions.length === 0 ? (
-        <div className="text-gray-400">
-          No open positions
-          {/* TESTING: Add test button when no positions */}
-          <div className="mt-3">
-            <button
-              onClick={() => handleSquareOff("TEST_POS_001", "RELIANCE")}
-              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded text-sm font-medium"
-            >
-              🧪 Test Square-Off (Mock Position)
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-700">
-                <th className="text-left p-2">Position ID</th>
-                <th className="text-left p-2">Symbol</th>
-                <th className="text-left p-2">Side</th>
-                <th className="text-left p-2">Quantity</th>
-                <th className="text-left p-2">Entry Price</th>
-                <th className="text-left p-2">LTP</th>
-                <th className="text-left p-2">P&L</th>
-                <th className="text-left p-2">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {positions.map((position: any, index: number) => {
-                const positionId = position.id || position.positionId || `pos_${index}`;
-                const currentStatus = squareOffStatus[positionId] || 'idle';
-                const currentMessage = squareOffMessage[positionId] || '';
-                
-                return (
-                  <tr key={index} className="border-b border-gray-700">
-                    <td className="p-2 text-xs font-mono text-gray-400">{positionId}</td>
-                    <td className="p-2 font-medium">{position.tradingSymbol}</td>
-                    <td className="p-2">
-                      <span className={`px-2 py-1 rounded text-xs ${
-                        position.buyOrSell === 'BUY' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'
-                      }`}>
-                        {position.buyOrSell}
-                      </span>
-                    </td>
-                    <td className="p-2">{position.netQty}</td>
-                    <td className="p-2">₹{position.averagePrice || 'N/A'}</td>
-                    <td className="p-2">₹{position.lastTradedPrice || 'N/A'}</td>
-                    <td className="p-2 text-green-400">+₹0</td>
-                    <td className="p-2">
-                      <div className="space-y-2">
-                        <button
-                          onClick={() => handleSquareOff(positionId, position.tradingSymbol)}
-                          disabled={currentStatus === 'loading'}
-                          className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                            currentStatus === 'loading'
-                              ? 'bg-gray-600 text-gray-300 cursor-not-allowed'
-                              : currentStatus === 'success'
-                              ? 'bg-green-600 hover:bg-green-700 text-white'
-                              : currentStatus === 'error'
-                              ? 'bg-red-700 hover:bg-red-800 text-white'
-                              : 'bg-red-600 hover:bg-red-700 text-white'
-                          }`}
-                        >
-                          {currentStatus === 'loading' ? '⏳ Processing...' : '🚨 Square Off'}
-                        </button>
-                        
-                        {currentMessage && (
-                          <div className={`text-xs ${
-                            currentStatus === 'success' ? 'text-green-400' : 
-                            currentStatus === 'error' ? 'text-red-400' : 'text-blue-400'
-                          }`}>
-                            {currentMessage}
-                          </div>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-      
-      {/* Confirmation Dialog */}
-      {confirmDialog && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4">
-            <div className="flex items-center mb-4">
-              <div className="text-red-500 text-2xl mr-3">🚨</div>
-              <h3 className="text-xl font-semibold text-white">Confirm Square-Off</h3>
-            </div>
-            
-            <div className="text-gray-300 mb-6">
-              <p className="mb-2">Are you sure you want to square off this position?</p>
-              <div className="bg-gray-700 p-3 rounded">
-                <p><strong>Symbol:</strong> {confirmDialog.symbol}</p>
-                <p><strong>Position ID:</strong> <span className="font-mono text-sm">{confirmDialog.positionId}</span></p>
-              </div>
-              <p className="text-red-400 text-sm mt-3">
-                ⚠️ This action cannot be undone and will close your position immediately.
+          
+          {/* Summary Stats */}
+          <div className="flex flex-wrap gap-4">
+            <div className="bg-white/10 backdrop-blur-sm rounded-xl px-4 py-2 border border-white/20">
+              <p className="text-xs text-blue-200 mb-1">Total P&L</p>
+              <p className={`text-lg font-bold ${getPnLColor(totalUnrealizedPnL)}`}>
+                {formatCurrency(totalUnrealizedPnL)}
               </p>
             </div>
-            
-            <div className="flex space-x-3">
-              <button
-                onClick={() => setConfirmDialog(null)}
-                className="flex-1 px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={confirmSquareOff}
-                className="flex-1 px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 transition-colors font-medium"
-              >
-                🚨 Confirm Square-Off
-              </button>
+            <div className="bg-white/10 backdrop-blur-sm rounded-xl px-4 py-2 border border-white/20">
+              <p className="text-xs text-blue-200 mb-1">Total Qty</p>
+              <p className="text-lg font-bold text-white">{totalQuantity.toLocaleString()}</p>
+            </div>
+            <div className="bg-white/10 backdrop-blur-sm rounded-xl px-4 py-2 border border-white/20">
+              <p className="text-xs text-blue-200 mb-1">Long/Short</p>
+              <p className="text-lg font-bold text-white">{longPositions}/{shortPositions}</p>
             </div>
           </div>
         </div>
-      )}
+      </div>
+
+      {/* Positions Table */}
+      <div className="relative p-8">
+        <div className="relative bg-white/5 backdrop-blur-xl rounded-2xl border border-white/20 overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-white/5 border-b border-white/20">
+                <tr>
+                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Symbol</th>
+                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Side</th>
+                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Quantity</th>
+                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Avg Price</th>
+                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">LTP</th>
+                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Unrealized P&L</th>
+                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/10">
+                <AnimatePresence>
+                  {displayData.map((position: Position, index: number) => (
+                    <motion.tr
+                      key={position.id}
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: 20 }}
+                      transition={{ duration: 0.3, delay: index * 0.05 }}
+                      className="hover:bg-white/5 transition-all duration-200 group"
+                    >
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm font-medium text-white group-hover:text-blue-200 transition-colors">
+                          {position.symbol}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className={`inline-flex px-3 py-1 text-xs font-semibold rounded-full border ${getSideColor(position.side)}`}>
+                          {position.side}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-200">
+                        {position.qty.toLocaleString()}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-200">
+                        {formatCurrency(position.avg_price)}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-200">
+                        {formatCurrency(position.ltp)}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className={`text-sm font-medium ${getPnLColor(position.unrealized || 0)}`}>
+                          {formatCurrency(position.unrealized || 0)}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex space-x-2">
+                          <button className="bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white px-3 py-1 rounded-lg text-xs font-medium transition-all duration-200 shadow-md hover:shadow-lg transform hover:scale-105">
+                            Square Off
+                          </button>
+                          <button className="bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 text-white px-3 py-1 rounded-lg text-xs font-medium transition-all duration-200 shadow-md hover:shadow-lg transform hover:scale-105">
+                            Modify
+                          </button>
+                        </div>
+                      </td>
+                    </motion.tr>
+                  ))}
+                </AnimatePresence>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
   );
-}
+};
+
+export default Positions;

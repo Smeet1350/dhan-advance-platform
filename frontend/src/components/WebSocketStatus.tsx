@@ -1,174 +1,115 @@
-import { useState, useEffect } from 'react';
-import { connectWS } from '../ws';
+import React from 'react';
+import { motion } from 'framer-motion';
+import { ConnectionState } from '../api';
 
-export default function WebSocketStatus() {
-  const [isConnected, setIsConnected] = useState(false);
-  const [lastMessage, setLastMessage] = useState<any>(null);
-  const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
-  const [ws, setWs] = useState<WebSocket | null>(null);
+interface WebSocketStatusProps {
+  connectionState: string;
+  rtt: number;
+  reconnectAttempts: number;
+}
 
-  useEffect(() => {
-    // Cleanup on unmount
-    return () => {
-      if (ws) {
-        ws.close();
-      }
-    };
-  }, [ws]);
-
-  const handleConnect = () => {
-    try {
-      setConnectionStatus('connecting');
-      
-      const websocket = connectWS((message) => {
-        setLastMessage(message);
-        console.log('📥 WebSocket message received:', message);
-        
-        // Dispatch message update for debug panel
-        window.dispatchEvent(new CustomEvent('ws-status-update', {
-          detail: { status: connectionStatus, message }
-        }));
-        
-        // Handle different message types
-        if (message.event === 'ping') {
-          console.log('🔄 Ping received');
-        } else if (message.event === 'subscribed') {
-          console.log('✅ Subscription confirmed');
-        }
-      });
-      
-      websocket.onopen = () => {
-        setIsConnected(true);
-        setConnectionStatus('connected');
-        console.log('🔌 WebSocket connected');
-        
-        // Dispatch status update for debug panel
-        window.dispatchEvent(new CustomEvent('ws-status-update', {
-          detail: { status: 'connected', message: null }
-        }));
-        
-        // Subscribe to channels
-        websocket.send(JSON.stringify({
-          type: 'subscribe',
-          channels: ['holdings', 'positions', 'orders', 'trades']
-        }));
-      };
-      
-      websocket.onclose = () => {
-        setIsConnected(false);
-        setConnectionStatus('disconnected');
-        console.log('🔌 WebSocket disconnected');
-        
-        // Dispatch status update for debug panel
-        window.dispatchEvent(new CustomEvent('ws-status-update', {
-          detail: { status: 'disconnected', message: null }
-        }));
-      };
-      
-      websocket.onerror = (error) => {
-        console.error('❌ WebSocket error:', error);
-        setConnectionStatus('disconnected');
-        
-        // Dispatch status update for debug panel
-        window.dispatchEvent(new CustomEvent('ws-status-update', {
-          detail: { status: 'disconnected', message: null }
-        }));
-      };
-      
-      setWs(websocket);
-      
-    } catch (error) {
-      console.error('Failed to connect:', error);
-      setConnectionStatus('disconnected');
-    }
-  };
-
-  const handleDisconnect = () => {
-    if (ws) {
-      ws.close();
-      setWs(null);
-    }
-  };
-
-  const getStatusColor = () => {
-    switch (connectionStatus) {
-      case 'connected':
-        return 'text-green-400';
-      case 'connecting':
-        return 'text-yellow-400';
-      case 'disconnected':
-        return 'text-red-400';
+const WebSocketStatus: React.FC<WebSocketStatusProps> = ({ connectionState, rtt, reconnectAttempts }) => {
+  const getStatusConfig = () => {
+    switch (connectionState) {
+      case ConnectionState.CONNECTED:
+        return {
+          color: 'from-green-500 to-emerald-600',
+          bgColor: 'bg-green-500/20',
+          borderColor: 'border-green-400/30',
+          textColor: 'text-green-300',
+          icon: '🟢',
+          text: 'Connected',
+          pulse: true
+        };
+      case ConnectionState.CONNECTING:
+        return {
+          color: 'from-blue-500 to-indigo-600',
+          bgColor: 'bg-blue-500/20',
+          borderColor: 'border-blue-400/30',
+          textColor: 'text-blue-300',
+          icon: '🔄',
+          text: 'Connecting...',
+          pulse: true
+        };
+      case ConnectionState.RECONNECTING:
+        return {
+          color: 'from-yellow-500 to-orange-600',
+          bgColor: 'bg-yellow-500/20',
+          borderColor: 'border-yellow-400/30',
+          textColor: 'text-yellow-300',
+          icon: '🔄',
+          text: `Reconnecting (${reconnectAttempts})`,
+          pulse: true
+        };
+      case ConnectionState.OFFLINE:
+        return {
+          color: 'from-red-500 to-pink-600',
+          bgColor: 'bg-red-500/20',
+          borderColor: 'border-red-400/30',
+          textColor: 'text-red-300',
+          icon: '🔴',
+          text: 'Offline',
+          pulse: false
+        };
       default:
-        return 'text-gray-400';
+        return {
+          color: 'from-gray-500 to-slate-600',
+          bgColor: 'bg-gray-500/20',
+          borderColor: 'border-gray-400/30',
+          textColor: 'text-gray-300',
+          icon: '⚪',
+          text: 'Unknown',
+          pulse: false
+        };
     }
   };
 
-  const getStatusIcon = () => {
-    switch (connectionStatus) {
-      case 'connected':
-        return '🟢';
-      case 'connecting':
-        return '🟡';
-      case 'disconnected':
-        return '🔴';
-      default:
-        return '⚪';
-    }
-  };
+  const statusConfig = getStatusConfig();
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4">
-      <h3 className="text-lg font-semibold mb-3">WebSocket Status</h3>
+    <motion.div
+      initial={{ opacity: 0, scale: 0.9 }}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={{ duration: 0.3 }}
+      className={`relative group overflow-hidden bg-gradient-to-r ${statusConfig.color} backdrop-blur-xl rounded-2xl px-4 py-3 border ${statusConfig.borderColor} shadow-lg hover:shadow-xl transition-all duration-300 hover:scale-105`}
+    >
+      {/* Animated Background */}
+      <div className="absolute inset-0 bg-gradient-to-r from-white/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
       
-      <div className="space-y-3">
-        {/* Connection Status */}
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-400">Status:</span>
-          <div className="flex items-center space-x-2">
-            <span className={getStatusColor()}>{getStatusIcon()}</span>
-            <span className={getStatusColor()}>
-              {connectionStatus.charAt(0).toUpperCase() + connectionStatus.slice(1)}
+      <div className="relative flex items-center space-x-3">
+        {/* Status Icon */}
+        <div className={`w-3 h-3 bg-gradient-to-br ${statusConfig.color} rounded-full ${statusConfig.pulse ? 'animate-pulse' : ''}`}></div>
+        
+        {/* Status Text */}
+        <div className="flex flex-col">
+          <span className={`text-sm font-semibold ${statusConfig.textColor}`}>
+            {statusConfig.text}
+          </span>
+          {connectionState === ConnectionState.CONNECTED && (
+            <span className="text-xs text-green-200">
+              RTT: {rtt}ms
             </span>
-          </div>
-        </div>
-
-        {/* Connection Controls */}
-        <div className="flex space-x-2">
-          {!isConnected ? (
-            <button
-              onClick={handleConnect}
-              disabled={connectionStatus === 'connecting'}
-              className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50"
-            >
-              {connectionStatus === 'connecting' ? 'Connecting...' : 'Connect'}
-            </button>
-          ) : (
-            <button
-              onClick={handleDisconnect}
-              className="px-3 py-1 bg-red-600 text-white rounded text-sm hover:bg-red-700"
-            >
-              Disconnect
-            </button>
           )}
         </div>
-
-        {/* Last Message */}
-        {lastMessage && (
-          <div className="mt-3 p-2 bg-gray-700 rounded text-xs">
-            <div className="text-gray-400 mb-1">Last Message:</div>
-            <div className="font-mono">
-              {JSON.stringify(lastMessage, null, 2)}
+        
+        {/* Connection Quality Indicator */}
+        {connectionState === ConnectionState.CONNECTED && (
+          <div className="ml-2">
+            <div className="flex space-x-1">
+              {[1, 2, 3].map((bar) => (
+                <div
+                  key={bar}
+                  className={`w-1 h-${bar} bg-green-400 rounded-full ${
+                    rtt < 100 ? 'opacity-100' : rtt < 200 ? 'opacity-70' : 'opacity-40'
+                  }`}
+                ></div>
+              ))}
             </div>
           </div>
         )}
-
-        {/* Connection Info */}
-        {isConnected && (
-          <div className="text-xs text-gray-500">
-            ✅ Real-time updates active
-          </div>
-        )}
       </div>
-    </div>
+    </motion.div>
   );
-}
+};
+
+export default WebSocketStatus;

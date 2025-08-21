@@ -1,6 +1,6 @@
 // API Configuration
-export const API_BASE = "http://localhost:8000";
-export const WS_URL = "ws://localhost:8000/ws";
+export const API_BASE = "http://localhost:8002";
+export const WS_URL = "ws://localhost:8002/ws";
 
 // Environment-based configuration
 export const config = {

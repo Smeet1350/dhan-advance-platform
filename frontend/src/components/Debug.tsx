@@ -8,9 +8,9 @@ export default function Debug() {
   const testAPI = async () => {
     try {
       setStatus("Testing API connection...");
-      const response = await api.get("/healthz");
+      const response = await api.fetch("/healthz");
       setStatus("API connected successfully!");
-      setData(response.data);
+      setData(response);
     } catch (error: any) {
       setStatus(`API Error: ${error.message}`);
       console.error("Debug API Error:", error);
@@ -20,9 +20,9 @@ export default function Debug() {
   const testHoldings = async () => {
     try {
       setStatus("Testing holdings endpoint...");
-      const response = await api.get("/holdings");
+      const response = await api.holdings();
       setStatus("Holdings fetched successfully!");
-      setData(response.data);
+      setData(response);
     } catch (error: any) {
       setStatus(`Holdings Error: ${error.message}`);
       console.error("Debug Holdings Error:", error);
