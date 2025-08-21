@@ -193,6 +193,10 @@ class DhanClient:
         else:
             return self._fetch_real_holdings()
     
+    async def fetch_holdings_async(self) -> List[Holding]:
+        """Async version of fetch_holdings"""
+        return self.fetch_holdings()
+    
     def _fetch_mock_holdings(self) -> List[Holding]:
         """Fetch mock holdings"""
         with mock_state.lock:
@@ -238,6 +242,10 @@ class DhanClient:
             return self._fetch_mock_positions()
         else:
             return self._fetch_real_positions()
+    
+    async def fetch_positions_async(self) -> List[Position]:
+        """Async version of fetch_positions"""
+        return self.fetch_positions()
     
     def _fetch_mock_positions(self) -> List[Position]:
         """Fetch mock positions"""
@@ -292,6 +300,10 @@ class DhanClient:
         else:
             return self._fetch_real_orders(status)
     
+    async def fetch_orders_async(self, status: Optional[str] = None) -> List[Order]:
+        """Async version of fetch_orders"""
+        return self.fetch_orders(status)
+    
     def _fetch_mock_orders(self, status: Optional[str] = None) -> List[Order]:
         """Fetch mock orders"""
         with mock_state.lock:
@@ -321,6 +333,10 @@ class DhanClient:
             return self._fetch_mock_trades(from_date, to_date)
         else:
             return self._fetch_real_trades(from_date, to_date)
+    
+    async def fetch_trades_async(self, from_date: str = None, to_date: str = None) -> List[Trade]:
+        """Async version of fetch_trades"""
+        return self.fetch_trades(from_date, to_date)
     
     def _fetch_mock_trades(self, from_date: str, to_date: str) -> List[Trade]:
         """Fetch mock trades"""
@@ -370,6 +386,10 @@ class DhanClient:
         else:
             return self._fetch_real_ltp(symbols)
     
+    async def fetch_ltp_async(self, symbols: List[str]) -> Dict[str, float]:
+        """Async version of fetch_ltp"""
+        return self.fetch_ltp(symbols)
+    
     def _fetch_mock_ltp(self, symbols: List[str]) -> Dict[str, float]:
         """Fetch mock LTP values"""
         with mock_state.lock:
@@ -396,6 +416,10 @@ class DhanClient:
             return self._squareoff_mock(position_id)
         else:
             return self._squareoff_real(position_id)
+    
+    async def squareoff_async(self, position_id: str) -> Dict[str, Any]:
+        """Async version of squareoff"""
+        return self.squareoff(position_id)
     
     def _squareoff_mock(self, position_id: str) -> Dict[str, Any]:
         """Square off mock position"""
@@ -510,6 +534,10 @@ class DhanClient:
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             return None
+    
+    async def get_pnl_async(self):
+        """Async version of get_pnl"""
+        return self.get_pnl()
 
 # Global client instance
 dhan_client = DhanClient()
