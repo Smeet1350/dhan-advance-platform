@@ -132,32 +132,30 @@ class WebSocketManager:
     
     def _compute_positions_delta(self, old_positions: List, new_positions: List) -> Dict[str, Any]:
         """Compute positions delta"""
-        old_ids = {pos.get('id') for pos in old_positions}
-        new_ids = {pos.get('id') for pos in new_positions}
+        old_ids = {position.id for position in old_positions}
+        new_ids = {position.id for position in new_positions}
         
         removed = list(old_ids - new_ids)
         upsert = []
         
-        for pos in new_positions:
-            pos_id = pos.get('id')
-            old_pos = next((p for p in old_positions if p.get('id') == pos_id), None)
+        for position in new_positions:
+            old_position = next((p for p in old_positions if p.id == position.id), None)
             
-            if old_pos is None or pos != old_pos:
-                upsert.append(pos)
+            if old_position is None or position != old_position:
+                upsert.append(position)
         
         return {"upsert": upsert, "remove": removed}
     
     def _compute_orders_delta(self, old_orders: List, new_orders: List) -> Dict[str, Any]:
         """Compute orders delta with status counts"""
-        old_ids = {order.get('order_id') for order in old_orders}
-        new_ids = {order.get('order_id') for order in new_orders}
+        old_ids = {order.order_id for order in old_orders}
+        new_ids = {order.order_id for order in new_orders}
         
         removed = list(old_ids - new_ids)
         upsert = []
         
         for order in new_orders:
-            order_id = order.get('order_id')
-            old_order = next((o for o in old_orders if o.get('order_id') == order_id), None)
+            old_order = next((o for o in old_orders if o.order_id == order.order_id), None)
             
             if old_order is None or order != old_order:
                 upsert.append(order)
@@ -165,7 +163,7 @@ class WebSocketManager:
         # Compute status counts
         status_counts = {"open": 0, "completed": 0, "cancelled": 0}
         for order in new_orders:
-            status = order.get('status', '').lower()
+            status = order.status.lower()
             if status in status_counts:
                 status_counts[status] += 1
         
@@ -173,15 +171,14 @@ class WebSocketManager:
     
     def _compute_holdings_delta(self, old_holdings: List, new_holdings: List) -> Dict[str, Any]:
         """Compute holdings delta"""
-        old_isins = {holding.get('isin') for holding in old_holdings}
-        new_isins = {holding.get('isin') for holding in new_holdings}
+        old_isins = {holding.isin for holding in old_holdings}
+        new_isins = {holding.isin for holding in new_holdings}
         
         removed = list(old_isins - new_isins)
         upsert = []
         
         for holding in new_holdings:
-            isin = holding.get('isin')
-            old_holding = next((h for h in old_holdings if h.get('isin') == isin), None)
+            old_holding = next((h for h in old_holdings if h.isin == holding.isin), None)
             
             if old_holding is None or holding != old_holding:
                 upsert.append(holding)
@@ -190,26 +187,25 @@ class WebSocketManager:
     
     def _compute_trades_delta(self, old_trades: List, new_trades: List) -> Dict[str, Any]:
         """Compute trades delta"""
-        old_ids = {trade.get('trade_id') for trade in old_trades}
-        new_ids = {trade.get('trade_id') for trade in new_trades}
+        old_ids = {trade.trade_id for trade in old_trades}
+        new_ids = {trade.trade_id for trade in new_trades}
         
         removed = list(old_ids - new_ids)
         upsert = []
         
         for trade in new_trades:
-            trade_id = trade.get('trade_id')
-            old_trade = next((t for t in old_trades if t.get('trade_id') == trade_id), None)
+            old_trade = next((t for t in old_trades if t.trade_id == trade.trade_id), None)
             
             if old_trade is None or trade != old_trade:
                 upsert.append(trade)
         
         return {"upsert": upsert, "remove": removed}
     
-    def _compute_pnl_delta(self, old_pnl: Dict, new_pnl: Dict) -> Dict[str, Any]:
+    def _compute_pnl_delta(self, old_pnl: Any, new_pnl: Any) -> Dict[str, Any]:
         """Compute PnL delta"""
         return {
-            "totals": new_pnl.get('totals', {}),
-            "perSymbol": new_pnl.get('perSymbol', [])
+            "totals": new_pnl.totals,
+            "perSymbol": new_pnl.per_symbol
         }
     
     async def connect(self, websocket: WebSocket):
@@ -355,24 +351,64 @@ class WebSocketManager:
             await self.send_to_client(websocket, nack_msg)
     
     async def emit_delta(self, channel: str, changes: Dict[str, Any]):
-        """Emit delta event for a channel"""
-        event = ChangeEvent(
-            type=MessageType(f"{channel}.delta"),
-            seq=self.get_next_seq(),
-            server_time=datetime.now().isoformat(),
-            changes=changes,
-            channel=channel
-        )
-        
-        # Add to buffer for resume
-        self.event_buffer.append(event)
-        if len(self.event_buffer) > self.buffer_size:
-            self.event_buffer.pop(0)
-        
-        # Broadcast to subscribed clients
-        await self.broadcast(asdict(event), [channel])
-        
-        logger.debug(f"Emitted {channel} delta: seq={event.seq}")
+        """Emit delta changes to all subscribed clients"""
+        try:
+            seq = self.get_next_seq()
+            server_time = datetime.now().isoformat()
+            
+            # Map channel to correct message type
+            message_type_map = {
+                "positions": MessageType.POSITIONS_DELTA,
+                "orders": MessageType.ORDERS_DELTA,
+                "holdings": MessageType.HOLDINGS_DELTA,
+                "trades": MessageType.TRADES_DELTA,
+                "pnl": MessageType.PNL_UPDATE  # PnL uses update, not delta
+            }
+            
+            message_type = message_type_map.get(channel)
+            if not message_type:
+                logger.warning(f"Unknown channel for delta emission: {channel}")
+                return
+            
+            if message_type == MessageType.PNL_UPDATE:
+                # PnL update has different structure
+                message = {
+                    "type": message_type.value,
+                    "seq": seq,
+                    "serverTime": server_time,
+                    "totals": changes.get("totals", {}),
+                    "perSymbol": changes.get("perSymbol", [])
+                }
+            else:
+                # Regular delta message
+                message = {
+                    "type": message_type.value,
+                    "seq": seq,
+                    "serverTime": server_time,
+                    "changes": changes
+                }
+            
+            # Store in event buffer for resume functionality
+            event = ChangeEvent(
+                type=message_type,
+                seq=seq,
+                server_time=server_time,
+                changes=changes,
+                channel=channel
+            )
+            self.event_buffer.append(event)
+            
+            # Keep buffer size manageable
+            if len(self.event_buffer) > self.buffer_size:
+                self.event_buffer.pop(0)
+            
+            # Broadcast to all connected clients
+            await self.broadcast(message)
+            
+            logger.debug(f"Emitted {channel} delta: seq={seq}")
+            
+        except Exception as e:
+            logger.error(f"Error emitting {channel} delta: {e}")
     
     async def emit_summary(self, channel: str, data: Any):
         """Emit summary event for backpressure"""

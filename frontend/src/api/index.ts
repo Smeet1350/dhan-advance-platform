@@ -1,6 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { API_BASE, WS_URL } from '../config';
+import { config } from '../config';
+
+// API Configuration
+const API_BASE = config.API_BASE;
+const WS_URL = config.WS_URL;
 
 // WebSocket Connection States
 export const ConnectionState = {

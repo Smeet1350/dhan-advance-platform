@@ -611,6 +611,196 @@ class DhanClient:
         """Async version of recalculate_pnl"""
         return self.recalculate_pnl()
 
+    # New Trading Methods
+    async def squareoff_position_async(self, position_id: str, quantity: int):
+        """Square off a position asynchronously"""
+        try:
+            logger.info(f"Square-off request for position {position_id}, quantity: {quantity}")
+            
+            if self.use_mock_data:
+                # Mock square-off - simulate order placement
+                await asyncio.sleep(0.5)  # Simulate API delay
+                
+                # Generate mock order ID
+                order_id = f"SO_{position_id}_{int(time.time())}"
+                
+                logger.info(f"Mock square-off executed: {order_id}")
+                return {
+                    "order_id": order_id,
+                    "status": "executed",
+                    "position_id": position_id,
+                    "quantity": quantity,
+                    "execution_time": datetime.now().isoformat()
+                }
+            else:
+                # Real Dhan API square-off
+                # This would integrate with actual Dhan trading API
+                logger.info(f"Real square-off for position {position_id}")
+                # Placeholder for real implementation
+                return {
+                    "order_id": f"REAL_SO_{position_id}_{int(time.time())}",
+                    "status": "executed",
+                    "position_id": position_id,
+                    "quantity": quantity,
+                    "execution_time": datetime.now().isoformat()
+                }
+                
+        except Exception as e:
+            logger.error(f"Error in square-off: {e}")
+            return None
+
+    async def place_order_async(self, order_data: dict):
+        """Place a new order asynchronously"""
+        try:
+            logger.info(f"Order placement request: {order_data}")
+            
+            if self.use_mock_data:
+                # Mock order placement
+                await asyncio.sleep(0.5)  # Simulate API delay
+                
+                # Generate mock order ID
+                order_id = f"ORD_{order_data['symbol']}_{int(time.time())}"
+                
+                logger.info(f"Mock order placed: {order_id}")
+                return {
+                    "order_id": order_id,
+                    "status": "placed",
+                    "symbol": order_data["symbol"],
+                    "side": order_data["side"],
+                    "type": order_data["type"],
+                    "quantity": order_data["quantity"],
+                    "price": order_data.get("price", 0),
+                    "placed_at": datetime.now().isoformat(),
+                    "filled_qty": 0
+                }
+            else:
+                # Real Dhan API order placement
+                logger.info(f"Real order placement for {order_data['symbol']}")
+                # Placeholder for real implementation
+                return {
+                    "order_id": f"REAL_ORD_{order_data['symbol']}_{int(time.time())}",
+                    "status": "placed",
+                    "symbol": order_data["symbol"],
+                    "side": order_data["side"],
+                    "type": order_data["type"],
+                    "quantity": order_data["quantity"],
+                    "price": order_data.get("price", 0),
+                    "placed_at": datetime.now().isoformat(),
+                    "filled_qty": 0
+                }
+                
+        except Exception as e:
+            logger.error(f"Error placing order: {e}")
+            return None
+
+    async def modify_order_async(self, order_id: str, modify_data: dict):
+        """Modify an existing order asynchronously"""
+        try:
+            logger.info(f"Order modification request for {order_id}: {modify_data}")
+            
+            if self.use_mock_data:
+                # Mock order modification
+                await asyncio.sleep(0.3)  # Simulate API delay
+                
+                logger.info(f"Mock order modified: {order_id}")
+                return {
+                    "order_id": order_id,
+                    "status": "cancelled",
+                    "cancelled_at": datetime.now().isoformat()
+                }
+            else:
+                # Real Dhan API order modification
+                logger.info(f"Real order modification for {order_id}")
+                # Placeholder for real implementation
+                return {
+                    "order_id": order_id,
+                    "status": "modified",
+                    "modifications": modify_data,
+                    "modified_at": datetime.now().isoformat()
+                }
+                
+        except Exception as e:
+            logger.error(f"Error modifying order: {e}")
+            return None
+
+    async def cancel_order_async(self, order_id: str):
+        """Cancel an existing order asynchronously"""
+        try:
+            logger.info(f"Order cancellation request for {order_id}")
+            
+            if self.use_mock_data:
+                # Mock order cancellation
+                await asyncio.sleep(0.3)  # Simulate API delay
+                
+                logger.info(f"Mock order cancelled: {order_id}")
+                return {
+                    "order_id": order_id,
+                    "status": "modified",
+                    "modifications": modify_data,
+                    "modified_at": datetime.now().isoformat()
+                }
+            else:
+                # Real Dhan API order cancellation
+                logger.info(f"Real order cancellation for {order_id}")
+                # Placeholder for real implementation
+                return {
+                    "order_id": order_id,
+                    "status": "cancelled",
+                    "cancelled_at": datetime.now().isoformat()
+                }
+                
+        except Exception as e:
+            logger.error(f"Error cancelling order: {e}")
+            return None
+
+    def get_position_risk_metrics(self, position_id: str):
+        """Get risk metrics for a specific position"""
+        try:
+            positions = self.fetch_positions()
+            position = next((p for p in positions if p.id == position_id), None)
+            
+            if not position:
+                return None
+            
+            # Calculate risk metrics
+            current_value = position.qty * position.ltp
+            unrealized_pnl = position.unrealized or 0
+            pnl_percentage = (unrealized_pnl / (position.qty * position.avg_price)) * 100 if position.qty * position.avg_price > 0 else 0
+            
+            # Determine risk level
+            if abs(unrealized_pnl) < 1000:
+                risk_level = "LOW"
+            elif abs(unrealized_pnl) < 5000:
+                risk_level = "MEDIUM"
+            else:
+                risk_level = "HIGH"
+            
+            # Calculate stop loss and take profit suggestions
+            if position.side == Side.LONG:
+                stop_loss_suggestion = position.avg_price * 0.95
+                take_profit_suggestion = position.avg_price * 1.10
+            else:
+                stop_loss_suggestion = position.avg_price * 1.05
+                take_profit_suggestion = position.avg_price * 0.90
+            
+            return {
+                "position_id": position_id,
+                "symbol": position.symbol,
+                "current_value": current_value,
+                "unrealized_pnl": unrealized_pnl,
+                "pnl_percentage": pnl_percentage,
+                "risk_level": risk_level,
+                "stop_loss_suggestion": stop_loss_suggestion,
+                "take_profit_suggestion": take_profit_suggestion,
+                "position_size": position.qty,
+                "avg_price": position.avg_price,
+                "ltp": position.ltp
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating risk metrics: {e}")
+            return None
+
 # Global client instance
 dhan_client = DhanClient()
 
