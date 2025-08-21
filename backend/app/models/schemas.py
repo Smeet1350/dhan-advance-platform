@@ -2,177 +2,109 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Union
 from datetime import datetime
 from decimal import Decimal
+from enum import Enum
 
-# Base response models
-class BaseResponse(BaseModel):
-    """Base response model for all API endpoints"""
-    status: str = Field(..., description="Response status (success/error)")
-    remarks: Optional[str] = Field(None, description="Additional remarks or messages")
+# Enums
+class Side(str, Enum):
+    LONG = "LONG"
+    SHORT = "SHORT"
 
-# Holdings models
+class OrderType(str, Enum):
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+    STOP = "STOP"
+    STOP_LIMIT = "STOP_LIMIT"
+
+class OrderStatus(str, Enum):
+    PENDING = "PENDING"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    FILLED = "FILLED"
+    CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
+
+# DTOs as specified in requirements
 class Holding(BaseModel):
-    """Individual holding/portfolio item"""
-    exchange: str = Field(..., description="Exchange (NSE, BSE, etc.)")
-    trading_symbol: str = Field(..., alias="tradingSymbol", description="Trading symbol (e.g., TATASTEEL)")
-    security_id: str = Field(..., alias="securityId", description="Security identifier")
+    """Holding DTO: isin, symbol, qty, avg_price, ltp, value, day_change"""
     isin: str = Field(..., description="ISIN code")
-    total_qty: int = Field(..., alias="totalQty", description="Total quantity held")
-    dp_qty: int = Field(..., alias="dpQty", description="DP quantity")
-    t1_qty: int = Field(..., alias="t1Qty", description="T+1 quantity")
-    mtf_t1_qty: int = Field(..., alias="mtf_t1_qty", description="MTF T+1 quantity")
-    mtf_qty: int = Field(..., alias="mtf_qty", description="MTF quantity")
-    available_qty: int = Field(..., alias="availableQty", description="Available quantity for trading")
-    collateral_qty: int = Field(..., alias="collateralQty", description="Collateral quantity")
-    avg_cost_price: float = Field(..., alias="avgCostPrice", description="Average cost price")
-    last_traded_price: float = Field(..., alias="lastTradedPrice", description="Last traded price")
-    
-    # Computed fields
-    @property
-    def market_value(self) -> float:
-        """Calculate current market value"""
-        return self.total_qty * self.last_traded_price
-    
-    @property
-    def unrealized_pnl(self) -> float:
-        """Calculate unrealized P&L"""
-        return (self.last_traded_price - self.avg_cost_price) * self.total_qty
-    
-    @property
-    def pnl_percentage(self) -> float:
-        """Calculate P&L percentage"""
-        if self.avg_cost_price > 0:
-            return ((self.last_traded_price - self.avg_cost_price) / self.avg_cost_price) * 100
-        return 0.0
+    symbol: str = Field(..., description="Trading symbol")
+    qty: int = Field(..., description="Quantity held")
+    avg_price: float = Field(..., description="Average purchase price")
+    ltp: float = Field(..., description="Last traded price")
+    value: float = Field(..., description="Current market value")
+    day_change: float = Field(..., description="Day's change in value")
 
-    class Config:
-        populate_by_name = True
-        json_encoders = {
-            Decimal: lambda v: float(v)
-        }
-
-class HoldingsResponse(BaseResponse):
-    """Response model for holdings endpoint"""
-    data: List[Holding] = Field(..., description="List of holdings")
-
-# Positions models
 class Position(BaseModel):
-    """Individual position item"""
+    """Position DTO: id, symbol, side(LONG|SHORT), qty, avg_price, ltp, unrealized"""
+    id: str = Field(..., description="Position ID")
     symbol: str = Field(..., description="Trading symbol")
-    qty: float = Field(..., description="Position quantity")
+    side: Side = Field(..., description="Position side (LONG/SHORT)")
+    qty: int = Field(..., description="Position quantity")
     avg_price: float = Field(..., description="Average entry price")
-    pnl: float = Field(..., description="Current P&L")
-    
-    # Additional fields from Dhan API
-    exchange_segment: Optional[str] = Field(None, alias="exchangeSegment", description="Exchange segment")
-    product_type: Optional[str] = Field(None, alias="productType", description="Product type (CNC, MIS, etc.)")
-    side: Optional[str] = Field(None, description="Position side (LONG/SHORT)")
-    
-    class Config:
-        populate_by_name = True
+    ltp: float = Field(..., description="Last traded price")
+    unrealized: float = Field(..., description="Unrealized P&L")
 
-class PositionsResponse(BaseResponse):
-    """Response model for positions endpoint"""
-    data: List[Position] = Field(..., description="List of positions")
-
-# Orders models
 class Order(BaseModel):
-    """Individual order item"""
-    order_id: str = Field(..., alias="orderId", description="Unique order identifier")
+    """Order DTO: order_id, symbol, side, type, price, qty, filled_qty, status, placed_at"""
+    order_id: str = Field(..., description="Unique order identifier")
     symbol: str = Field(..., description="Trading symbol")
-    status: str = Field(..., description="Order status")
+    side: Side = Field(..., description="Order side (LONG/SHORT)")
+    type: OrderType = Field(..., description="Order type")
     price: float = Field(..., description="Order price")
-    qty: float = Field(..., description="Order quantity")
-    
-    # Additional fields from Dhan API
-    exchange_order_id: Optional[str] = Field(None, alias="exchangeOrderId", description="Exchange order ID")
-    order_type: Optional[str] = Field(None, alias="orderType", description="Order type (MARKET, LIMIT, etc.)")
-    product_type: Optional[str] = Field(None, alias="productType", description="Product type")
-    transaction_type: Optional[str] = Field(None, alias="transactionType", description="Transaction type (BUY/SELL)")
-    create_time: Optional[str] = Field(None, alias="createTime", description="Order creation time")
-    
-    class Config:
-        populate_by_name = True
+    qty: int = Field(..., description="Order quantity")
+    filled_qty: int = Field(..., description="Filled quantity")
+    status: OrderStatus = Field(..., description="Order status")
+    placed_at: datetime = Field(..., description="Order placement time")
 
-class OrdersResponse(BaseResponse):
-    """Response model for orders endpoint"""
-    data: List[Order] = Field(..., description="List of orders")
-
-# Trade History models
 class Trade(BaseModel):
-    """Individual trade item"""
-    dhan_client_id: str = Field(..., alias="dhanClientId", description="Dhan client ID")
-    order_id: str = Field(..., alias="orderId", description="Order ID")
-    exchange_order_id: str = Field(..., alias="exchangeOrderId", description="Exchange order ID")
-    exchange_trade_id: str = Field(..., alias="exchangeTradeId", description="Exchange trade ID")
-    transaction_type: str = Field(..., alias="transactionType", description="Transaction type (BUY/SELL)")
-    exchange_segment: str = Field(..., alias="exchangeSegment", description="Exchange segment")
-    product_type: str = Field(..., alias="productType", description="Product type")
-    order_type: str = Field(..., alias="orderType", description="Order type")
-    custom_symbol: str = Field(..., alias="customSymbol", description="Trading symbol")
-    security_id: str = Field(..., alias="securityId", description="Security ID")
-    traded_quantity: int = Field(..., alias="tradedQuantity", description="Traded quantity")
-    traded_price: float = Field(..., alias="tradedPrice", description="Traded price")
-    isin: str = Field(..., description="ISIN code")
-    instrument: str = Field(..., description="Instrument type")
-    exchange_time: str = Field(..., alias="exchangeTime", description="Exchange trade time")
-    
-    # Charges
-    sebi_tax: float = Field(..., alias="sebiTax", description="SEBI tax")
-    stt: float = Field(..., alias="stt", description="Securities Transaction Tax")
-    brokerage_charges: float = Field(..., alias="brokerageCharges", description="Brokerage charges")
-    service_tax: float = Field(..., alias="serviceTax", description="Service tax")
-    exchange_transaction_charges: float = Field(..., alias="exchangeTransactionCharges", description="Exchange transaction charges")
-    stamp_duty: float = Field(..., alias="stampDuty", description="Stamp duty")
-    
-    class Config:
-        populate_by_name = True
-        json_encoders = {
-            Decimal: lambda v: float(v)
-        }
-
-class TradeHistoryResponse(BaseResponse):
-    """Response model for trade history endpoint"""
-    data: List[Trade] = Field(..., description="List of trades")
-
-# P&L models
-class PnLSummary(BaseModel):
-    """P&L summary for a symbol or overall portfolio"""
+    """Trade DTO: trade_id, order_id, symbol, side, price, qty, time"""
+    trade_id: str = Field(..., description="Unique trade identifier")
+    order_id: str = Field(..., description="Associated order ID")
     symbol: str = Field(..., description="Trading symbol")
-    total_qty: int = Field(..., description="Total quantity")
-    avg_buy_price: float = Field(..., description="Average buy price")
-    avg_sell_price: Optional[float] = Field(None, description="Average sell price")
-    current_price: float = Field(..., description="Current market price")
-    realized_pnl: float = Field(..., description="Realized P&L")
-    unrealized_pnl: float = Field(..., description="Unrealized P&L")
-    total_pnl: float = Field(..., description="Total P&L")
-    pnl_percentage: float = Field(..., description="P&L percentage")
-    
-    class Config:
-        json_encoders = {
-            Decimal: lambda v: float(v)
-        }
+    side: Side = Field(..., description="Trade side (LONG/SHORT)")
+    price: float = Field(..., description="Trade price")
+    qty: int = Field(..., description="Trade quantity")
+    time: datetime = Field(..., description="Trade execution time")
 
-class PnLResponse(BaseResponse):
-    """Response model for P&L endpoint"""
-    data: List[PnLSummary] = Field(..., description="List of P&L summaries")
+class PnLSymbol(BaseModel):
+    """P&L data for a specific symbol"""
+    symbol: str = Field(..., description="Trading symbol")
+    side: Side = Field(..., description="Position side")
+    qty: int = Field(..., description="Quantity")
+    avg: float = Field(..., description="Average price")
+    ltp: float = Field(..., description="Last traded price")
+    unrealized: float = Field(..., description="Unrealized P&L")
+    today_pnl: float = Field(..., description="Today's P&L")
 
-# Error models
-class ErrorDetail(BaseModel):
-    """Error detail information"""
-    code: str = Field(..., description="Error code")
-    message: str = Field(..., description="Error message")
-    details: Optional[dict] = Field(None, description="Additional error details")
+class PnLTotals(BaseModel):
+    """P&L totals"""
+    realized: float = Field(..., description="Realized P&L")
+    unrealized: float = Field(..., description="Unrealized P&L")
+    day: float = Field(..., description="Day's P&L")
+    currency: str = Field(..., description="Currency (INR)")
+    updated_at: datetime = Field(..., description="Last update time")
+    trading_day: str = Field(..., description="Trading day")
 
-class ErrorResponse(BaseModel):
-    """Standard error response model"""
-    status: str = Field("error", description="Response status")
-    error: ErrorDetail = Field(..., description="Error details")
-    remarks: Optional[str] = Field(None, description="Additional remarks")
+class PnL(BaseModel):
+    """PnL payload: { totals:{ realized, unrealized, day, currency, updatedAt, tradingDay }, perSymbol:[{symbol, side, qty, avg, ltp, unrealized, todayPnL}] }"""
+    totals: PnLTotals = Field(..., description="P&L totals")
+    per_symbol: List[PnLSymbol] = Field(..., alias="perSymbol", description="P&L per symbol")
 
-# API Response wrapper (consistent with our response utility)
+# Canonical error codes
+class ErrorCode(str, Enum):
+    DHAN_UNAUTHORIZED = "DHAN_UNAUTHORIZED"
+    DHAN_TIMEOUT = "DHAN_TIMEOUT"
+    DHAN_RATE_LIMIT = "DHAN_RATE_LIMIT"
+    UPSTREAM_FAIL = "UPSTREAM_FAIL"
+    VALIDATION_ERROR = "VALIDATION_ERROR"
+    POSITION_NOT_OPEN = "POSITION_NOT_OPEN"
+    ORDER_REJECTED = "ORDER_REJECTED"
+    ZERO_QTY = "ZERO_QTY"
+    LTP_STALE = "LTP_STALE"
+
+# API Response wrapper
 class APIResponse(BaseModel):
     """Standard API response wrapper"""
     ok: bool = Field(..., description="Success status")
-    data: Optional[Union[dict, list]] = Field(None, description="Response data")
-    error: Optional[ErrorDetail] = Field(None, description="Error details if any")
+    data: Optional[Union[dict, list, Holding, Position, Order, Trade, PnL]] = Field(None, description="Response data")
+    error: Optional[dict] = Field(None, description="Error details if any")
     trace_id: Optional[str] = Field(None, description="Request trace ID")

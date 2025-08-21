@@ -6,13 +6,14 @@ from app.routes.logging import router as logging_router
 from app.routes import data
 from app.routes import actions
 from app.ws import live
+from app.settings import settings
 
 app = FastAPI()
 
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -27,6 +28,7 @@ app.include_router(live.router)  # WebSocket for real-time updates
 @app.on_event("startup")
 async def startup_event():
     logger.info("Dhan Automation Backend Application started successfully")
+    logger.info(f"Using {'MOCK' if settings.USE_MOCK_DATA else 'REAL'} data mode")
 
 @app.on_event("shutdown")
 async def shutdown_event():
