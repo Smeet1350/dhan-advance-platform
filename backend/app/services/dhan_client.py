@@ -2,9 +2,12 @@ import asyncio
 import random
 import time
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable
 from threading import Thread, Lock
 import uuid
+from enum import Enum
+import structlog
+from dateutil import tz
 
 from app.utils.logger import logger
 from app.models.schemas import (
@@ -178,8 +181,17 @@ class MockDataState:
                 # Trigger PnL recalculation after LTP updates
                 self._trigger_pnl_update()
 
+    def get_ltp(self, symbol: str) -> float:
+        """Get LTP for a specific symbol from cache"""
+        return self.ltp_cache.get(symbol, 0.0)
+
 # Global mock state
 mock_state = MockDataState()
+
+class CircuitBreakerState(str, Enum):
+    CLOSED = "CLOSED"      # Normal operation
+    OPEN = "OPEN"          # Circuit is open, reject requests
+    HALF_OPEN = "HALF_OPEN"  # Testing if service is back
 
 class DhanClient:
     """Dhan client wrapper with real/mock capabilities"""
@@ -194,7 +206,20 @@ class DhanClient:
         # Register PnL update callback for mock data
         if self.use_mock:
             mock_state.add_pnl_update_callback(self._on_pnl_update_triggered)
-    
+        
+        # Circuit breaker configuration
+        self.circuit_breaker_state = CircuitBreakerState.CLOSED
+        self.failure_count = 0
+        self.circuit_breaker_threshold = 5  # Failures before opening circuit
+        self.circuit_breaker_timeout = 60   # Seconds to wait before half-open
+        self.last_failure_time = None
+        self.next_attempt_time = None
+        
+        # Performance tracking
+        self.last_api_call = None
+        self.api_call_count = 0
+        self.error_count = 0
+
     def _on_pnl_update_triggered(self):
         """Callback triggered when PnL should be recalculated"""
         logger.debug("PnL update triggered - will recalculate on next fetch")
@@ -210,229 +235,112 @@ class DhanClient:
             logger.info("Falling back to mock data")
             self.use_mock = True
     
-    def fetch_holdings(self) -> List[Holding]:
-        """Fetch holdings from Dhan API or mock data"""
-        if self.use_mock:
-            return self._fetch_mock_holdings()
-        else:
-            return self._fetch_real_holdings()
-    
-    async def fetch_holdings_async(self) -> List[Holding]:
-        """Async version of fetch_holdings"""
-        return self.fetch_holdings()
-    
-    def _fetch_mock_holdings(self) -> List[Holding]:
-        """Fetch mock holdings"""
-        with mock_state.lock:
-            return mock_state.holdings.copy()
-    
-    def _fetch_real_holdings(self) -> List[Holding]:
-        """Fetch real holdings from Dhan API"""
+    async def _execute_with_circuit_breaker(self, operation: Callable, *args, **kwargs):
+        """Execute operation with circuit breaker protection"""
+        if self.circuit_breaker_state == CircuitBreakerState.OPEN:
+            if self.next_attempt_time and datetime.now() < self.next_attempt_time:
+                raise Exception(f"Circuit breaker is OPEN. Next attempt at {self.next_attempt_time}")
+            else:
+                # Time to test if service is back
+                self.circuit_breaker_state = CircuitBreakerState.HALF_OPEN
+                logger.info("Circuit breaker transitioning to HALF_OPEN state")
+        
         try:
-            if not self.dhan:
-                raise Exception("Dhan client not initialized")
+            self.last_api_call = datetime.now()
+            self.api_call_count += 1
             
-            result = self.dhan.get_holdings()
+            result = await operation(*args, **kwargs)
             
-            if not result or 'data' not in result:
-                raise Exception("Invalid response from Dhan API")
+            # Success - close circuit if it was half-open
+            if self.circuit_breaker_state == CircuitBreakerState.HALF_OPEN:
+                self.circuit_breaker_state = CircuitBreakerState.CLOSED
+                self.failure_count = 0
+                logger.info("Circuit breaker closed after successful operation")
             
-            holdings = []
-            for item in result.get('data', []):
-                try:
-                    holding = Holding(
-                        isin=item.get('isin', ''),
-                        symbol=item.get('tradingSymbol', ''),
-                        qty=item.get('totalQty', 0),
-                        avg_price=float(item.get('avgCostPrice', 0)),
-                        ltp=float(item.get('lastTradedPrice', 0)),
-                        value=float(item.get('lastTradedPrice', 0)) * int(item.get('totalQty', 0)),
-                        day_change=0.0  # Calculate from real data if available
-                    )
-                    holdings.append(holding)
-                except Exception as e:
-                    logger.warning(f"Failed to parse holding item: {e}")
-                    continue
-            
-            return holdings
+            return result
             
         except Exception as e:
-            logger.error(f"Failed to fetch real holdings: {e}")
-            raise
-    
-    def fetch_positions(self) -> List[Position]:
-        """Fetch positions from Dhan API or mock data"""
+            self.error_count += 1
+            self.last_failure_time = datetime.now()
+            self.failure_count += 1
+            
+            logger.warning(f"Operation failed: {e}. Failure count: {self.failure_count}")
+            
+            # Check if we should open the circuit
+            if self.failure_count >= self.circuit_breaker_threshold:
+                self.circuit_breaker_state = CircuitBreakerState.OPEN
+                self.next_attempt_time = datetime.now() + timedelta(seconds=self.circuit_breaker_timeout)
+                logger.error(f"Circuit breaker OPENED after {self.failure_count} failures. Next attempt at {self.next_attempt_time}")
+            
+            raise e
+
+    async def fetch_holdings_async(self) -> List[Holding]:
+        """Fetch holdings asynchronously with circuit breaker protection"""
+        return await self._execute_with_circuit_breaker(self._fetch_holdings_internal)
+
+    async def _fetch_holdings_internal(self) -> List[Holding]:
+        """Internal holdings fetch implementation"""
         if self.use_mock:
-            return self._fetch_mock_positions()
+            await asyncio.sleep(0.1)  # Simulate API delay
+            return mock_state.holdings
         else:
-            return self._fetch_real_positions()
+            # Real Dhan API implementation would go here
+            raise NotImplementedError("Real Dhan API not implemented yet")
     
     async def fetch_positions_async(self) -> List[Position]:
-        """Async version of fetch_positions"""
-        return self.fetch_positions()
-    
-    def _fetch_mock_positions(self) -> List[Position]:
-        """Fetch mock positions"""
-        with mock_state.lock:
-            return mock_state.positions.copy()
-    
-    def _fetch_real_positions(self) -> List[Position]:
-        """Fetch real positions from Dhan API"""
-        try:
-            if not self.dhan:
-                raise Exception("Dhan client not initialized")
-            
-            result = self.dhan.get_positions()
-            
-            if not result or 'data' not in result:
-                raise Exception("Invalid response from Dhan API")
-            
-            positions = []
-            for item in result.get('data', []):
-                try:
-                    net_qty = int(item.get('netQty', 0))
-                    if net_qty == 0:
-                        continue  # Skip closed positions
-                    
-                    side = Side.LONG if net_qty > 0 else Side.SHORT
-                    qty = abs(net_qty)
-                    
-                    position = Position(
-                        id=str(item.get('id', '')),
-                        symbol=item.get('tradingSymbol', ''),
-                        side=side,
-                        qty=qty,
-                        avg_price=float(item.get('avgPrice', 0)),
-                        ltp=float(item.get('ltp', 0)),
-                        unrealized=float(item.get('unrealizedPnl', 0))
-                    )
-                    positions.append(position)
-                except Exception as e:
-                    logger.warning(f"Failed to parse position item: {e}")
-                    continue
-            
-            return positions
-            
-        except Exception as e:
-            logger.error(f"Failed to fetch real positions: {e}")
-            raise
-    
-    def fetch_orders(self, status: Optional[str] = None) -> List[Order]:
-        """Fetch orders from Dhan API or mock data"""
+        """Fetch positions asynchronously with circuit breaker protection"""
+        return await self._execute_with_circuit_breaker(self._fetch_positions_internal)
+
+    async def _fetch_positions_internal(self) -> List[Position]:
+        """Internal positions fetch implementation"""
         if self.use_mock:
-            return self._fetch_mock_orders(status)
+            await asyncio.sleep(0.1)  # Simulate API delay
+            return mock_state.positions
         else:
-            return self._fetch_real_orders(status)
+            # Real Dhan API implementation would go here
+            raise NotImplementedError("Real Dhan API not implemented yet")
     
     async def fetch_orders_async(self, status: Optional[str] = None) -> List[Order]:
-        """Async version of fetch_orders"""
-        return self.fetch_orders(status)
-    
-    def _fetch_mock_orders(self, status: Optional[str] = None) -> List[Order]:
-        """Fetch mock orders"""
-        with mock_state.lock:
-            orders = mock_state.orders.copy()
+        """Fetch orders asynchronously with circuit breaker protection"""
+        return await self._execute_with_circuit_breaker(self._fetch_orders_internal, status)
+
+    async def _fetch_orders_internal(self, status: Optional[str] = None) -> List[Order]:
+        """Internal orders fetch implementation"""
+        if self.use_mock:
+            await asyncio.sleep(0.1)  # Simulate API delay
+            orders = mock_state.orders
             if status:
-                return [order for order in orders if order.status.value == status]
+                orders = [order for order in orders if order.status == status.upper()]
             return orders
-    
-    def _fetch_real_orders(self, status: Optional[str] = None) -> List[Order]:
-        """Fetch real orders from Dhan API"""
-        try:
-            if not self.dhan:
-                raise Exception("Dhan client not initialized")
-            
-            # Note: Implement based on actual Dhan API
-            # This is a placeholder
-            logger.warning("Real orders endpoint not implemented - returning empty list")
-            return []
-            
-        except Exception as e:
-            logger.error(f"Failed to fetch real orders: {e}")
-            raise
-    
-    def fetch_trades(self, from_date: str, to_date: str) -> List[Trade]:
-        """Fetch trades from Dhan API or mock data"""
-        if self.use_mock:
-            return self._fetch_mock_trades(from_date, to_date)
         else:
-            return self._fetch_real_trades(from_date, to_date)
+            # Real Dhan API implementation would go here
+            raise NotImplementedError("Real Dhan API not implemented yet")
     
-    async def fetch_trades_async(self, from_date: str = None, to_date: str = None) -> List[Trade]:
-        """Async version of fetch_trades"""
-        return self.fetch_trades(from_date, to_date)
-    
-    def _fetch_mock_trades(self, from_date: str, to_date: str) -> List[Trade]:
-        """Fetch mock trades"""
-        with mock_state.lock:
-            return mock_state.trades.copy()
-    
-    def _fetch_real_trades(self, from_date: str, to_date: str) -> List[Trade]:
-        """Fetch real trades from Dhan API"""
-        try:
-            if not self.dhan:
-                raise Exception("Dhan client not initialized")
-            
-            result = self.dhan.get_trade_history(from_date, to_date)
-            
-            if not result or 'data' not in result:
-                raise Exception("Invalid response from Dhan API")
-            
-            trades = []
-            for item in result.get('data', []):
-                try:
-                    side = Side.LONG if item.get('transactionType') == 'BUY' else Side.SHORT
-                    
-                    trade = Trade(
-                        trade_id=str(item.get('exchangeTradeId', '')),
-                        order_id=str(item.get('orderId', '')),
-                        symbol=item.get('customSymbol', ''),
-                        side=side,
-                        price=float(item.get('tradedPrice', 0)),
-                        qty=int(item.get('tradedQuantity', 0)),
-                        time=datetime.fromisoformat(item.get('exchangeTime', ''))
-                    )
-                    trades.append(trade)
-                except Exception as e:
-                    logger.warning(f"Failed to parse trade item: {e}")
-                    continue
-            
-            return trades
-            
-        except Exception as e:
-            logger.error(f"Failed to fetch real trades: {e}")
-            raise
-    
-    def fetch_ltp(self, symbols: List[str]) -> Dict[str, float]:
-        """Fetch LTP for symbols from Dhan API or mock data"""
+    async def fetch_trades_async(self, from_date: Optional[str] = None, to_date: Optional[str] = None) -> List[Trade]:
+        """Fetch trades asynchronously with circuit breaker protection"""
+        return await self._execute_with_circuit_breaker(self._fetch_trades_internal, from_date, to_date)
+
+    async def _fetch_trades_internal(self, from_date: Optional[str] = None, to_date: Optional[str] = None) -> List[Trade]:
+        """Internal trades fetch implementation"""
         if self.use_mock:
-            return self._fetch_mock_ltp(symbols)
+            await asyncio.sleep(0.1)  # Simulate API delay
+            return mock_state.trades
         else:
-            return self._fetch_real_ltp(symbols)
+            # Real Dhan API implementation would go here
+            raise NotImplementedError("Real Dhan API not implemented yet")
     
     async def fetch_ltp_async(self, symbols: List[str]) -> Dict[str, float]:
-        """Async version of fetch_ltp"""
-        return self.fetch_ltp(symbols)
-    
-    def _fetch_mock_ltp(self, symbols: List[str]) -> Dict[str, float]:
-        """Fetch mock LTP values"""
-        with mock_state.lock:
-            return {symbol: mock_state.ltp_cache.get(symbol, 0.0) for symbol in symbols}
-    
-    def _fetch_real_ltp(self, symbols: List[str]) -> Dict[str, float]:
-        """Fetch real LTP values from Dhan API"""
-        try:
-            if not self.dhan:
-                raise Exception("Dhan client not initialized")
-            
-            # Note: Implement based on actual Dhan API
-            # This is a placeholder
-            logger.warning("Real LTP endpoint not implemented - returning empty dict")
-            return {}
-            
-        except Exception as e:
-            logger.error(f"Failed to fetch real LTP: {e}")
-            raise
+        """Fetch LTP asynchronously with circuit breaker protection"""
+        return await self._execute_with_circuit_breaker(self._fetch_ltp_internal, symbols)
+
+    async def _fetch_ltp_internal(self, symbols: List[str]) -> Dict[str, float]:
+        """Internal LTP fetch implementation"""
+        if self.use_mock:
+            await asyncio.sleep(0.05)  # Simulate API delay
+            return {symbol: mock_state.get_ltp(symbol) for symbol in symbols}
+        else:
+            # Real Dhan API implementation would go here
+            raise NotImplementedError("Real Dhan API not implemented yet")
     
     def squareoff(self, position_id: str) -> Dict[str, Any]:
         """Square off a position"""
@@ -443,46 +351,140 @@ class DhanClient:
     
     async def squareoff_async(self, position_id: str) -> Dict[str, Any]:
         """Async version of squareoff"""
-        return self.squareoff(position_id)
-    
-    def _squareoff_mock(self, position_id: str) -> Dict[str, Any]:
-        """Square off mock position"""
-        with mock_state.lock:
-            position = next((p for p in mock_state.positions if p.id == position_id), None)
-            if not position:
-                raise ValueError(f"Position {position_id} not found")
-            
-            if position.qty == 0:
-                raise ValueError(f"Position {position_id} has zero quantity")
-            
-            # Remove position
-            mock_state.positions.remove(position)
-            
-            return {
-                "status": "success",
-                "message": f"Position {position_id} squared off successfully",
-                "position_id": position_id,
-                "symbol": position.symbol,
-                "quantity": position.qty,
-                "side": position.side.value,
-                "timestamp": datetime.now().isoformat()
-            }
-    
-    def _squareoff_real(self, position_id: str) -> Dict[str, Any]:
-        """Square off real position through Dhan API"""
+        return await self._execute_with_circuit_breaker(self._squareoff_position_internal, position_id)
+
+    async def _squareoff_position_internal(self, position_id: str) -> Dict[str, Any]:
+        """Internal square-off implementation"""
         try:
-            if not self.dhan:
-                raise Exception("Dhan client not initialized")
-            
-            # Note: Implement based on actual Dhan API
-            # This is a placeholder
-            logger.warning("Real squareoff endpoint not implemented")
-            raise Exception("Real squareoff not implemented")
-            
+            logger.info(f"Square-off request for position {position_id}")
+            if self.use_mock:
+                await asyncio.sleep(0.5)  # Simulate processing time
+                order_id = f"SO_{position_id}_{int(time.time())}"
+                return {
+                    "order_id": order_id,
+                    "status": "executed",
+                    "position_id": position_id,
+                    "quantity": 0, # Mock squareoff doesn't specify quantity
+                    "execution_time": datetime.now().isoformat()
+                }
+            else:
+                # Real Dhan API implementation would go here
+                raise NotImplementedError("Real Dhan API not implemented yet")
         except Exception as e:
-            logger.error(f"Failed to square off real position: {e}")
-            raise
-    
+            logger.error(f"Error in square-off: {e}")
+            return None
+
+    async def squareoff_all_positions_async(self, confirm: bool = False):
+        """Square off all positions asynchronously with circuit breaker protection"""
+        return await self._execute_with_circuit_breaker(self._squareoff_all_positions_internal, confirm)
+
+    async def _squareoff_all_positions_internal(self, confirm: bool = False):
+        """Internal bulk square-off implementation"""
+        try:
+            if not confirm:
+                raise ValueError("Confirmation required for bulk square-off")
+            
+            logger.info("Bulk square-off request for all positions")
+            if self.use_mock:
+                await asyncio.sleep(1.0)  # Simulate processing time
+                orders = []
+                for position in mock_state.positions:
+                    order_id = f"SO_BULK_{position.id}_{int(time.time())}"
+                    orders.append({
+                        "order_id": order_id,
+                        "status": "executed",
+                        "position_id": position.id,
+                        "quantity": position.qty,
+                        "execution_time": datetime.now().isoformat()
+                    })
+                
+                return {
+                    "status": "completed",
+                    "orders_executed": len(orders),
+                    "orders": orders
+                }
+            else:
+                # Real Dhan API implementation would go here
+                raise NotImplementedError("Real Dhan API not implemented yet")
+        except Exception as e:
+            logger.error(f"Error in bulk square-off: {e}")
+            return None
+
+    async def place_order_async(self, order_data: dict):
+        """Place a new order asynchronously with circuit breaker protection"""
+        return await self._execute_with_circuit_breaker(self._place_order_internal, order_data)
+
+    async def _place_order_internal(self, order_data: dict):
+        """Internal order placement implementation"""
+        try:
+            logger.info(f"Order placement request: {order_data}")
+            if self.use_mock:
+                await asyncio.sleep(0.8)  # Simulate processing time
+                order_id = f"ORD_{int(time.time())}"
+                return {
+                    "order_id": order_id,
+                    "status": "placed",
+                    "symbol": order_data["symbol"],
+                    "side": order_data["side"],
+                    "type": order_data["type"],
+                    "quantity": order_data["quantity"],
+                    "price": order_data.get("price", 0),
+                    "placed_at": datetime.now().isoformat(),
+                    "filled_qty": 0
+                }
+            else:
+                # Real Dhan API implementation would go here
+                raise NotImplementedError("Real Dhan API not implemented yet")
+        except Exception as e:
+            logger.error(f"Error placing order: {e}")
+            return None
+
+    async def modify_order_async(self, order_id: str, modify_data: dict):
+        """Modify an existing order asynchronously with circuit breaker protection"""
+        return await self._execute_with_circuit_breaker(self._modify_order_internal, order_id, modify_data)
+
+    async def _modify_order_internal(self, order_id: str, modify_data: dict):
+        """Internal order modification implementation"""
+        try:
+            logger.info(f"Order modification request for {order_id}: {modify_data}")
+            if self.use_mock:
+                await asyncio.sleep(0.6)  # Simulate processing time
+                return {
+                    "order_id": order_id,
+                    "status": "modified",
+                    "modifications": modify_data,
+                    "modified_at": datetime.now().isoformat()
+                }
+            else:
+                # Real Dhan API implementation would go here
+                raise NotImplementedError("Real Dhan API not implemented yet")
+        except Exception as e:
+            logger.error(f"Error modifying order: {e}")
+            return None
+
+    async def cancel_order_async(self, order_id: str):
+        """Cancel an existing order asynchronously with circuit breaker protection"""
+        return await self._execute_with_circuit_breaker(self._cancel_order_internal, order_id)
+
+    async def _cancel_order_internal(self, order_id: str):
+        """Internal order cancellation implementation"""
+        try:
+            logger.info(f"Order cancellation request for {order_id}")
+            if self.use_mock:
+                await asyncio.sleep(0.3)  # Simulate processing time
+                logger.info(f"Mock order cancelled: {order_id}")
+                return {
+                    "order_id": order_id,
+                    "status": "cancelled",
+                    "cancelled_at": datetime.now().isoformat()
+                }
+            else:
+                # Real Dhan API implementation would go here
+                raise NotImplementedError("Real Dhan API not implemented yet")
+        except Exception as e:
+            logger.error(f"Error cancelling order: {e}")
+            return None
+
     def get_pnl(self):
         """Calculate accurate P&L with exchange-day boundaries and consistency checks"""
         try:
@@ -600,6 +602,10 @@ class DhanClient:
     
     async def get_pnl_async(self):
         """Async version of get_pnl"""
+        return await self._execute_with_circuit_breaker(self._get_pnl_internal)
+
+    async def _get_pnl_internal(self) -> PnL:
+        """Internal PnL calculation implementation"""
         return self.get_pnl()
     
     def recalculate_pnl(self):
@@ -609,197 +615,75 @@ class DhanClient:
     
     async def recalculate_pnl_async(self):
         """Async version of recalculate_pnl"""
+        return await self._execute_with_circuit_breaker(self._recalculate_pnl_internal)
+
+    async def _recalculate_pnl_internal(self) -> PnL:
+        """Internal PnL recalculation implementation"""
         return self.recalculate_pnl()
 
     # New Trading Methods
-    async def squareoff_position_async(self, position_id: str, quantity: int):
-        """Square off a position asynchronously"""
+    async def get_position_risk_metrics(self, position_id: str):
+        """Get risk metrics for a specific position asynchronously with circuit breaker protection"""
+        return await self._execute_with_circuit_breaker(self._get_position_risk_metrics_internal, position_id)
+
+    async def _get_position_risk_metrics_internal(self, position_id: str):
+        """Internal risk metrics implementation"""
         try:
-            logger.info(f"Square-off request for position {position_id}, quantity: {quantity}")
-            
-            if self.use_mock_data:
-                # Mock square-off - simulate order placement
-                await asyncio.sleep(0.5)  # Simulate API delay
+            logger.info(f"Risk metrics request for position {position_id}")
+            if self.use_mock:
+                await asyncio.sleep(0.2)  # Simulate processing time
                 
-                # Generate mock order ID
-                order_id = f"SO_{position_id}_{int(time.time())}"
+                # Find the position
+                position = next((p for p in mock_state.positions if p.id == position_id), None)
+                if not position:
+                    return None
                 
-                logger.info(f"Mock square-off executed: {order_id}")
-                return {
-                    "order_id": order_id,
-                    "status": "executed",
+                # Calculate risk metrics
+                notional_value = position.qty * position.ltp
+                unrealized_pnl = position.qty * (position.ltp - position.avg_price) if position.side == Side.LONG else position.qty * (position.avg_price - position.ltp)
+                
+                risk_metrics = {
                     "position_id": position_id,
-                    "quantity": quantity,
-                    "execution_time": datetime.now().isoformat()
-                }
-            else:
-                # Real Dhan API square-off
-                # This would integrate with actual Dhan trading API
-                logger.info(f"Real square-off for position {position_id}")
-                # Placeholder for real implementation
-                return {
-                    "order_id": f"REAL_SO_{position_id}_{int(time.time())}",
-                    "status": "executed",
-                    "position_id": position_id,
-                    "quantity": quantity,
-                    "execution_time": datetime.now().isoformat()
+                    "symbol": position.symbol,
+                    "notional_value": round(notional_value, 2),
+                    "unrealized_pnl": round(unrealized_pnl, 2),
+                    "risk_percentage": round(abs(unrealized_pnl) / notional_value * 100, 2) if notional_value > 0 else 0,
+                    "concentration_risk": "LOW" if notional_value < 100000 else "MEDIUM" if notional_value < 500000 else "HIGH",
+                    "volatility_risk": "LOW",  # Mock data
+                    "liquidity_risk": "LOW",  # Mock data
+                    "recommendations": [
+                        "Position size is within acceptable limits",
+                        "Consider setting stop-loss orders",
+                        "Monitor market volatility"
+                    ]
                 }
                 
+                return risk_metrics
+            else:
+                # Real Dhan API implementation would go here
+                raise NotImplementedError("Real Dhan API not implemented yet")
         except Exception as e:
-            logger.error(f"Error in square-off: {e}")
+            logger.error(f"Error getting risk metrics: {e}")
             return None
 
-    async def place_order_async(self, order_data: dict):
-        """Place a new order asynchronously"""
-        try:
-            logger.info(f"Order placement request: {order_data}")
-            
-            if self.use_mock_data:
-                # Mock order placement
-                await asyncio.sleep(0.5)  # Simulate API delay
+    async def _start_ltp_updates(self):
+        """Start LTP updates for mock data"""
+        while True:
+            try:
+                await asyncio.sleep(2)  # Update every 2 seconds
+                mock_state._update_ltp_cache()
                 
-                # Generate mock order ID
-                order_id = f"ORD_{order_data['symbol']}_{int(time.time())}"
-                
-                logger.info(f"Mock order placed: {order_id}")
-                return {
-                    "order_id": order_id,
-                    "status": "placed",
-                    "symbol": order_data["symbol"],
-                    "side": order_data["side"],
-                    "type": order_data["type"],
-                    "quantity": order_data["quantity"],
-                    "price": order_data.get("price", 0),
-                    "placed_at": datetime.now().isoformat(),
-                    "filled_qty": 0
-                }
-            else:
-                # Real Dhan API order placement
-                logger.info(f"Real order placement for {order_data['symbol']}")
-                # Placeholder for real implementation
-                return {
-                    "order_id": f"REAL_ORD_{order_data['symbol']}_{int(time.time())}",
-                    "status": "placed",
-                    "symbol": order_data["symbol"],
-                    "side": order_data["side"],
-                    "type": order_data["type"],
-                    "quantity": order_data["quantity"],
-                    "price": order_data.get("price", 0),
-                    "placed_at": datetime.now().isoformat(),
-                    "filled_qty": 0
-                }
-                
-        except Exception as e:
-            logger.error(f"Error placing order: {e}")
-            return None
-
-    async def modify_order_async(self, order_id: str, modify_data: dict):
-        """Modify an existing order asynchronously"""
-        try:
-            logger.info(f"Order modification request for {order_id}: {modify_data}")
-            
-            if self.use_mock_data:
-                # Mock order modification
-                await asyncio.sleep(0.3)  # Simulate API delay
-                
-                logger.info(f"Mock order modified: {order_id}")
-                return {
-                    "order_id": order_id,
-                    "status": "cancelled",
-                    "cancelled_at": datetime.now().isoformat()
-                }
-            else:
-                # Real Dhan API order modification
-                logger.info(f"Real order modification for {order_id}")
-                # Placeholder for real implementation
-                return {
-                    "order_id": order_id,
-                    "status": "modified",
-                    "modifications": modify_data,
-                    "modified_at": datetime.now().isoformat()
-                }
-                
-        except Exception as e:
-            logger.error(f"Error modifying order: {e}")
-            return None
-
-    async def cancel_order_async(self, order_id: str):
-        """Cancel an existing order asynchronously"""
-        try:
-            logger.info(f"Order cancellation request for {order_id}")
-            
-            if self.use_mock_data:
-                # Mock order cancellation
-                await asyncio.sleep(0.3)  # Simulate API delay
-                
-                logger.info(f"Mock order cancelled: {order_id}")
-                return {
-                    "order_id": order_id,
-                    "status": "modified",
-                    "modifications": modify_data,
-                    "modified_at": datetime.now().isoformat()
-                }
-            else:
-                # Real Dhan API order cancellation
-                logger.info(f"Real order cancellation for {order_id}")
-                # Placeholder for real implementation
-                return {
-                    "order_id": order_id,
-                    "status": "cancelled",
-                    "cancelled_at": datetime.now().isoformat()
-                }
-                
-        except Exception as e:
-            logger.error(f"Error cancelling order: {e}")
-            return None
-
-    def get_position_risk_metrics(self, position_id: str):
-        """Get risk metrics for a specific position"""
-        try:
-            positions = self.fetch_positions()
-            position = next((p for p in positions if p.id == position_id), None)
-            
-            if not position:
-                return None
-            
-            # Calculate risk metrics
-            current_value = position.qty * position.ltp
-            unrealized_pnl = position.unrealized or 0
-            pnl_percentage = (unrealized_pnl / (position.qty * position.avg_price)) * 100 if position.qty * position.avg_price > 0 else 0
-            
-            # Determine risk level
-            if abs(unrealized_pnl) < 1000:
-                risk_level = "LOW"
-            elif abs(unrealized_pnl) < 5000:
-                risk_level = "MEDIUM"
-            else:
-                risk_level = "HIGH"
-            
-            # Calculate stop loss and take profit suggestions
-            if position.side == Side.LONG:
-                stop_loss_suggestion = position.avg_price * 0.95
-                take_profit_suggestion = position.avg_price * 1.10
-            else:
-                stop_loss_suggestion = position.avg_price * 1.05
-                take_profit_suggestion = position.avg_price * 0.90
-            
-            return {
-                "position_id": position_id,
-                "symbol": position.symbol,
-                "current_value": current_value,
-                "unrealized_pnl": unrealized_pnl,
-                "pnl_percentage": pnl_percentage,
-                "risk_level": risk_level,
-                "stop_loss_suggestion": stop_loss_suggestion,
-                "take_profit_suggestion": take_profit_suggestion,
-                "position_size": position.qty,
-                "avg_price": position.avg_price,
-                "ltp": position.ltp
-            }
-            
-        except Exception as e:
-            logger.error(f"Error calculating risk metrics: {e}")
-            return None
+                # Trigger PnL recalculation
+                if hasattr(mock_state, 'pnl_update_callbacks'):
+                    for callback in mock_state.pnl_update_callbacks:
+                        try:
+                            callback()
+                        except Exception as e:
+                            logger.error(f"Error in PnL update callback: {e}")
+                            
+            except Exception as e:
+                logger.error(f"Error in LTP update loop: {e}")
+                await asyncio.sleep(5)  # Wait longer on error
 
 # Global client instance
 dhan_client = DhanClient()

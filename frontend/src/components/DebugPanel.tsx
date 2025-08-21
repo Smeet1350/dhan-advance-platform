@@ -1,290 +1,693 @@
-import { useState, useEffect, useCallback } from 'react';
-import { config } from '../config';
-import { errorLogger, type ErrorLog } from '../services/errorLogger';
+import React, { useState, useEffect, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { api } from '../api';
 
-interface DebugPanelProps {
-  isVisible: boolean;
-  onClose: () => void;
+interface DebugStatus {
+  timestamp: string;
+  system: {
+    cpu_percent: number;
+    memory_percent: number;
+    memory_available_gb: number;
+    disk_percent: number;
+    disk_free_gb: number;
+  };
+  process: {
+    memory_mb: number;
+    cpu_percent: number;
+    threads: number;
+    open_files: number;
+  };
+  websocket: {
+    active_connections: number;
+    total_connections: number;
+    last_sequence: number;
+    uptime_seconds: number;
+    polling_active: boolean;
+    last_poll_times: Record<string, string>;
+  };
+  dhan_client: {
+    use_mock_data: boolean;
+    last_api_call: string | null;
+    api_call_count: number;
+    error_count: number;
+    circuit_breaker_state: string;
+  };
+  recent_errors: Array<{
+    timestamp: string;
+    error_type: string;
+    error_message: string;
+    trace_id?: string;
+    details?: any;
+  }>;
+  environment: {
+    python_version: string;
+    platform: string;
+    working_directory: string;
+  };
 }
 
-export default function DebugPanel({ isVisible, onClose }: DebugPanelProps) {
-  const [errors, setErrors] = useState<ErrorLog[]>([]);
-  const [wsStatus, setWsStatus] = useState<'connected' | 'disconnected' | 'connecting'>('disconnected');
-  const [lastWsMessage, setLastWsMessage] = useState<any>(null);
-  const [apiStatus, setApiStatus] = useState<'healthy' | 'unhealthy' | 'checking'>('checking');
+interface CircuitBreakerStatus {
+  dhan_api: {
+    state: string;
+    failure_count: number;
+    last_failure: string | null;
+    threshold: number;
+    timeout_seconds: number;
+    next_attempt: string | null;
+  };
+  websocket: {
+    state: string;
+    connection_health: string;
+  };
+}
 
-  // Listen to error logger updates
-  useEffect(() => {
-    const unsubscribe = errorLogger.addListener(setErrors);
-    return unsubscribe;
-  }, []);
-
-  // Check API health
-  const checkApiHealth = useCallback(async () => {
-    try {
-      setApiStatus('checking');
-      const response = await fetch(`${config.api.baseURL}/healthz`);
-      if (response.ok) {
-        setApiStatus('healthy');
-      } else {
-        setApiStatus('unhealthy');
-      }
-    } catch (error) {
-      setApiStatus('unhealthy');
-    }
-  }, []);
-
-  // Copy trace ID bundle
-  const copyTraceIdBundle = useCallback(async (traceId: string) => {
-    const errorBundle = {
-      timestamp: new Date().toISOString(),
-      traceId,
-      apiBase: config.api.baseURL,
-      wsStatus,
-      userAgent: navigator.userAgent,
-      url: window.location.href,
-      errors: errors.filter(e => e.traceId === traceId)
+interface PerformanceMetrics {
+  timestamp: string;
+  api_performance: Record<string, {
+    avg_response_time_ms: number;
+    p95_response_time_ms: number;
+    request_count: number;
+    error_rate: number;
+  }>;
+  websocket_performance: {
+    message_delivery: {
+      avg_latency_ms: number;
+      p95_latency_ms: number;
+      messages_sent: number;
+      delivery_success_rate: number;
     };
-
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(errorBundle, null, 2));
-      
-      // Show success feedback
-      const originalText = document.activeElement?.textContent;
-      if (document.activeElement) {
-        (document.activeElement as HTMLElement).textContent = '✅ Copied!';
-        setTimeout(() => {
-          if (document.activeElement) {
-            (document.activeElement as HTMLElement).textContent = originalText || 'Copy Trace ID';
-          }
-        }, 2000);
-      }
-    } catch (error) {
-      console.error('Failed to copy to clipboard:', error);
-      // Fallback: show in alert
-      alert('Error bundle copied to console. Check DevTools console.');
-      console.log('Error Bundle for Trace ID:', traceId, errorBundle);
-    }
-  }, [wsStatus, errors]);
-
-  // Copy all errors bundle
-  const copyAllErrorsBundle = useCallback(async () => {
-    const allErrorsBundle = {
-      timestamp: new Date().toISOString(),
-      apiBase: config.api.baseURL,
-      wsStatus,
-      userAgent: navigator.userAgent,
-      url: window.location.href,
-      totalErrors: errors.length,
-      errors: errors
+    polling: {
+      avg_poll_interval_ms: number;
+      last_poll_duration_ms: number;
+      poll_success_rate: number;
     };
+  };
+  system_trends: {
+    memory_percent: number[];
+    cpu_percent: number[];
+    trend_duration_minutes: number;
+  };
+  recommendations: string[];
+}
 
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(allErrorsBundle, null, 2));
-      alert('✅ All errors copied to clipboard!');
-    } catch (error) {
-      console.error('Failed to copy to clipboard:', error);
-      console.log('All Errors Bundle:', allErrorsBundle);
-      alert('Error bundle copied to console. Check DevTools console.');
-    }
-  }, [wsStatus, errors]);
+interface WebSocketEvent {
+  timestamp: string;
+  type: string;
+  channel: string | null;
+  sequence: number;
+  connection_count: number;
+  details: any;
+}
 
-  // Listen for WebSocket status updates
+const DebugPanel: React.FC = () => {
+  const [isVisible, setIsVisible] = useState(false);
+  const [activeTab, setActiveTab] = useState<'status' | 'circuit' | 'performance' | 'events' | 'logs'>('status');
+  const [debugStatus, setDebugStatus] = useState<DebugStatus | null>(null);
+  const [circuitStatus, setCircuitStatus] = useState<CircuitBreakerStatus | null>(null);
+  const [performanceMetrics, setPerformanceMetrics] = useState<PerformanceMetrics | null>(null);
+  const [wsEvents, setWsEvents] = useState<WebSocketEvent[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+
+  // Hotkey handler
   useEffect(() => {
-    const handleWsStatusUpdate = (event: CustomEvent) => {
-      setWsStatus(event.detail.status);
-      if (event.detail.message) {
-        setLastWsMessage(event.detail.message);
+    const handleKeyPress = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() === 'd' && event.ctrlKey) {
+        event.preventDefault();
+        setIsVisible(prev => !prev);
       }
     };
 
-    window.addEventListener('ws-status-update', handleWsStatusUpdate as EventListener);
-    return () => {
-      window.removeEventListener('ws-status-update', handleWsStatusUpdate as EventListener);
-    };
+    document.addEventListener('keydown', handleKeyPress);
+    return () => document.removeEventListener('keydown', handleKeyPress);
   }, []);
 
-  // Listen for global errors
+  // Auto-refresh data
   useEffect(() => {
-    const handleGlobalError = (event: ErrorEvent) => {
-      errorLogger.addError({
-        message: event.message,
-        error: event.error,
-        component: 'Global'
-      });
+    if (!isVisible) return;
+
+    const refreshData = async () => {
+      await fetchDebugData();
     };
 
-    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
-      errorLogger.addError({
-        message: event.reason?.message || 'Unhandled Promise Rejection',
-        error: event.reason,
-        component: 'Promise'
-      });
-    };
-
-    window.addEventListener('error', handleGlobalError);
-    window.addEventListener('unhandledrejection', handleUnhandledRejection);
-
-    return () => {
-      window.removeEventListener('error', handleGlobalError);
-      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
-    };
-  }, []);
-
-  // Check API health on mount and every 30 seconds
-  useEffect(() => {
-    checkApiHealth();
-    const interval = setInterval(checkApiHealth, 30000);
+    const interval = setInterval(refreshData, 5000); // Refresh every 5 seconds
     return () => clearInterval(interval);
-  }, [checkApiHealth]);
+  }, [isVisible]);
 
-  // Add sample error for testing
-  useEffect(() => {
-    errorLogger.addError({
-      message: 'Sample error for testing debug panel',
-      traceId: 'sample-trace-123',
-      component: 'DebugPanel'
-    });
-  }, []);
+  const fetchDebugData = useCallback(async () => {
+    if (!isVisible) return;
+
+    setIsLoading(true);
+    try {
+      // Fetch debug status
+      const statusResponse = await api.fetch('/debug/status');
+      if (statusResponse.ok) {
+        setDebugStatus(statusResponse.data);
+      }
+
+      // Fetch circuit breaker status
+      const circuitResponse = await api.fetch('/debug/circuit-breaker/status');
+      if (circuitResponse.ok) {
+        setCircuitStatus(circuitResponse.data);
+      }
+
+      // Fetch performance metrics
+      const perfResponse = await api.fetch('/debug/performance/metrics');
+      if (perfResponse.ok) {
+        setPerformanceMetrics(perfResponse.data);
+      }
+
+      // Fetch WebSocket events
+      const eventsResponse = await api.fetch('/debug/websocket/events?limit=20');
+      if (eventsResponse.ok) {
+        setWsEvents(eventsResponse.data.events);
+      }
+
+      setLastRefresh(new Date());
+    } catch (error) {
+      console.error('Error fetching debug data:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [isVisible]);
+
+  const resetCircuitBreaker = async (service: string) => {
+    try {
+      const response = await api.fetch(`/debug/circuit-breaker/reset?service=${service}`, {
+        method: 'POST'
+      });
+      if (response.ok) {
+        // Refresh data
+        await fetchDebugData();
+      }
+    } catch (error) {
+      console.error('Error resetting circuit breaker:', error);
+    }
+  };
+
+  const testWebSocket = async () => {
+    try {
+      const response = await api.fetch('/debug/websocket/test', {
+        method: 'POST'
+      });
+      if (response.ok) {
+        // Refresh data
+        await fetchDebugData();
+      }
+    } catch (error) {
+      console.error('Error testing WebSocket:', error);
+    }
+  };
+
+  const copyDebugBundle = () => {
+    const debugData = {
+      timestamp: new Date().toISOString(),
+      debugStatus,
+      circuitStatus,
+      performanceMetrics,
+      wsEvents
+    };
+
+    navigator.clipboard.writeText(JSON.stringify(debugData, null, 2));
+  };
 
   if (!isVisible) return null;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
-      <div className="bg-gray-900 rounded-lg max-w-4xl w-full max-h-[90vh] overflow-hidden">
-        {/* Header */}
-        <div className="bg-gray-800 px-6 py-4 border-b border-gray-700 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <span className="text-2xl">🐛</span>
-            <h2 className="text-xl font-semibold text-white">Debug Panel</h2>
-            <span className="text-sm text-gray-400">(Ctrl+D to toggle)</span>
-          </div>
-          <button
-            onClick={onClose}
-            className="text-gray-400 hover:text-white text-2xl font-bold"
-          >
-            ×
-          </button>
-        </div>
-
-        <div className="overflow-y-auto max-h-[calc(90vh-80px)]">
-          {/* System Status */}
-          <div className="p-6 border-b border-gray-700">
-            <h3 className="text-lg font-semibold text-white mb-4">System Status</h3>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-gray-800 p-4 rounded-lg">
-                <div className="text-sm text-gray-400 mb-2">API Status</div>
-                <div className={`text-lg font-medium ${
-                  apiStatus === 'healthy' ? 'text-green-400' :
-                  apiStatus === 'unhealthy' ? 'text-red-400' : 'text-yellow-400'
-                }`}>
-                  {apiStatus === 'healthy' ? '🟢 Healthy' :
-                   apiStatus === 'unhealthy' ? '🔴 Unhealthy' : '🟡 Checking...'}
-                </div>
-                <div className="text-xs text-gray-500 mt-1">{config.api.baseURL}</div>
+    <AnimatePresence>
+      <motion.div
+        initial={{ opacity: 0, scale: 0.9 }}
+        animate={{ opacity: 1, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.9 }}
+        className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+      >
+        <motion.div
+          initial={{ y: 50, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          exit={{ y: 50, opacity: 0 }}
+          className="bg-gray-900/95 backdrop-blur-xl rounded-3xl shadow-2xl border border-gray-700/50 w-full max-w-7xl max-h-[90vh] overflow-hidden"
+        >
+          {/* Header */}
+          <div className="bg-gradient-to-r from-gray-800 to-gray-900 p-6 border-b border-gray-700/50">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-2xl font-bold text-white">🔧 Debug Panel</h2>
+                <p className="text-gray-300">System monitoring and debugging tools</p>
               </div>
+              <div className="flex items-center space-x-4">
+                <button
+                  onClick={copyDebugBundle}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+                >
+                  📋 Copy Debug Bundle
+                </button>
+                <button
+                  onClick={() => setIsVisible(false)}
+                  className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg transition-colors"
+                >
+                  ✕ Close
+                </button>
+              </div>
+            </div>
+            
+            {/* Tab Navigation */}
+            <div className="flex space-x-1 mt-4">
+              {[
+                { id: 'status', label: 'System Status', icon: '📊' },
+                { id: 'circuit', label: 'Circuit Breakers', icon: '⚡' },
+                { id: 'performance', label: 'Performance', icon: '🚀' },
+                { id: 'events', label: 'WebSocket Events', icon: '🔌' },
+                { id: 'logs', label: 'Recent Logs', icon: '📝' }
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id as any)}
+                  className={`px-4 py-2 rounded-lg transition-colors ${
+                    activeTab === tab.id
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-700/50 text-gray-300 hover:bg-gray-700'
+                  }`}
+                >
+                  {tab.icon} {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
 
-              <div className="bg-gray-800 p-4 rounded-lg">
-                <div className="text-sm text-gray-400 mb-2">WebSocket Status</div>
-                <div className={`text-lg font-medium ${
-                  wsStatus === 'connected' ? 'text-green-400' :
-                  wsStatus === 'connecting' ? 'text-yellow-400' : 'text-red-400'
-                }`}>
-                  {wsStatus === 'connected' ? '🟢 Connected' :
-                   wsStatus === 'connecting' ? '🟡 Connecting...' : '🔴 Disconnected'}
+          {/* Content */}
+          <div className="p-6 overflow-y-auto max-h-[calc(90vh-200px)]">
+            {isLoading && (
+              <div className="text-center py-8">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto"></div>
+                <p className="text-gray-400 mt-4">Loading debug data...</p>
+              </div>
+            )}
+
+            {/* System Status Tab */}
+            {activeTab === 'status' && debugStatus && (
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  {/* System Metrics */}
+                  <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/50">
+                    <h3 className="text-lg font-semibold text-white mb-4">🖥️ System Metrics</h3>
+                    <div className="space-y-3">
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">CPU:</span>
+                        <span className={`font-mono ${debugStatus.system.cpu_percent > 80 ? 'text-red-400' : 'text-green-400'}`}>
+                          {debugStatus.system.cpu_percent}%
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">Memory:</span>
+                        <span className={`font-mono ${debugStatus.system.memory_percent > 85 ? 'text-red-400' : 'text-green-400'}`}>
+                          {debugStatus.system.memory_percent}%
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">Disk:</span>
+                        <span className={`font-mono ${debugStatus.system.disk_percent > 90 ? 'text-red-400' : 'text-green-400'}`}>
+                          {debugStatus.system.disk_percent}%
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* WebSocket Status */}
+                  <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/50">
+                    <h3 className="text-lg font-semibold text-white mb-4">🔌 WebSocket Status</h3>
+                    <div className="space-y-3">
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">Active:</span>
+                        <span className="font-mono text-blue-400">{debugStatus.websocket.active_connections}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">Total:</span>
+                        <span className="font-mono text-blue-400">{debugStatus.websocket.total_connections}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">Sequence:</span>
+                        <span className="font-mono text-blue-400">{debugStatus.websocket.last_sequence}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">Polling:</span>
+                        <span className={`font-mono ${debugStatus.websocket.polling_active ? 'text-green-400' : 'text-red-400'}`}>
+                          {debugStatus.websocket.polling_active ? 'Active' : 'Inactive'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Dhan Client Status */}
+                  <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/50">
+                    <h3 className="text-lg font-semibold text-white mb-4">📡 Dhan Client</h3>
+                    <div className="space-y-3">
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">Mode:</span>
+                        <span className={`font-mono ${debugStatus.dhan_client.use_mock_data ? 'text-yellow-400' : 'text-green-400'}`}>
+                          {debugStatus.dhan_client.use_mock_data ? 'Mock' : 'Real'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">API Calls:</span>
+                        <span className="font-mono text-blue-400">{debugStatus.dhan_client.api_call_count}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">Errors:</span>
+                        <span className={`font-mono ${debugStatus.dhan_client.error_count > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                          {debugStatus.dhan_client.error_count}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">Circuit:</span>
+                        <span className={`font-mono ${
+                          debugStatus.dhan_client.circuit_breaker_state === 'CLOSED' ? 'text-green-400' :
+                          debugStatus.dhan_client.circuit_breaker_state === 'HALF_OPEN' ? 'text-yellow-400' :
+                          'text-red-400'
+                        }`}>
+                          {debugStatus.dhan_client.circuit_breaker_state}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                {lastWsMessage && (
-                  <div className="text-xs text-gray-500 mt-1 truncate">
-                    Last: {JSON.stringify(lastWsMessage).slice(0, 50)}...
+
+                {/* Recent Errors */}
+                {debugStatus.recent_errors.length > 0 && (
+                  <div className="bg-red-900/20 rounded-xl p-4 border border-red-700/50">
+                    <h3 className="text-lg font-semibold text-red-300 mb-4">⚠️ Recent Errors</h3>
+                    <div className="space-y-2 max-h-40 overflow-y-auto">
+                      {debugStatus.recent_errors.map((error, index) => (
+                        <div key={index} className="bg-red-900/30 rounded-lg p-3">
+                          <div className="flex justify-between items-start">
+                            <span className="text-red-200 text-sm">{error.timestamp}</span>
+                            <span className="text-red-300 text-xs bg-red-800/50 px-2 py-1 rounded">
+                              {error.error_type}
+                            </span>
+                          </div>
+                          <p className="text-red-100 text-sm mt-1">{error.error_message}</p>
+                          {error.trace_id && (
+                            <p className="text-red-300 text-xs mt-1">Trace ID: {error.trace_id}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
+            )}
 
-              <div className="bg-gray-800 p-4 rounded-lg">
-                <div className="text-sm text-gray-400 mb-2">Error Count</div>
-                <div className="text-lg font-medium text-red-400">{errors.length}</div>
-                <div className="text-xs text-gray-500 mt-1">Last 10 errors</div>
+            {/* Circuit Breakers Tab */}
+            {activeTab === 'circuit' && circuitStatus && (
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* Dhan API Circuit Breaker */}
+                  <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/50">
+                    <h3 className="text-lg font-semibold text-white mb-4">📡 Dhan API Circuit Breaker</h3>
+                    <div className="space-y-3">
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">State:</span>
+                        <span className={`font-mono px-2 py-1 rounded text-sm ${
+                          circuitStatus.dhan_api.state === 'CLOSED' ? 'bg-green-600 text-white' :
+                          circuitStatus.dhan_api.state === 'HALF_OPEN' ? 'bg-yellow-600 text-white' :
+                          'bg-red-600 text-white'
+                        }`}>
+                          {circuitStatus.dhan_api.state}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">Failures:</span>
+                        <span className="font-mono text-blue-400">{circuitStatus.dhan_api.failure_count}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">Threshold:</span>
+                        <span className="font-mono text-gray-400">{circuitStatus.dhan_api.threshold}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">Timeout:</span>
+                        <span className="font-mono text-gray-400">{circuitStatus.dhan_api.timeout_seconds}s</span>
+                      </div>
+                      {circuitStatus.dhan_api.last_failure && (
+                        <div className="flex justify-between">
+                          <span className="text-gray-300">Last Failure:</span>
+                          <span className="font-mono text-red-400 text-sm">
+                            {new Date(circuitStatus.dhan_api.last_failure).toLocaleTimeString()}
+                          </span>
+                        </div>
+                      )}
+                      {circuitStatus.dhan_api.next_attempt && (
+                        <div className="flex justify-between">
+                          <span className="text-gray-300">Next Attempt:</span>
+                          <span className="font-mono text-yellow-400 text-sm">
+                            {new Date(circuitStatus.dhan_api.next_attempt).toLocaleTimeString()}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => resetCircuitBreaker('dhan_api')}
+                      className="w-full mt-4 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+                    >
+                      🔄 Reset Circuit Breaker
+                    </button>
+                  </div>
+
+                  {/* WebSocket Circuit Breaker */}
+                  <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/50">
+                    <h3 className="text-lg font-semibold text-white mb-4">🔌 WebSocket Health</h3>
+                    <div className="space-y-3">
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">State:</span>
+                        <span className="font-mono px-2 py-1 rounded text-sm bg-green-600 text-white">
+                          {circuitStatus.websocket.state}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-300">Health:</span>
+                        <span className={`font-mono px-2 py-1 rounded text-sm ${
+                          circuitStatus.websocket.connection_health === 'HEALTHY' ? 'bg-green-600 text-white' : 'bg-yellow-600 text-white'
+                        }`}>
+                          {circuitStatus.websocket.connection_health}
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={testWebSocket}
+                      className="w-full mt-4 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors"
+                    >
+                      🧪 Test WebSocket
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
+            )}
 
-          {/* Error Logs */}
-          <div className="p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-white">Error Logs</h3>
-              <button
-                onClick={copyAllErrorsBundle}
-                className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm"
-              >
-                📋 Copy All Errors
-              </button>
-            </div>
+            {/* Performance Tab */}
+            {activeTab === 'performance' && performanceMetrics && (
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* API Performance */}
+                  <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/50">
+                    <h3 className="text-lg font-semibold text-white mb-4">🚀 API Performance</h3>
+                    <div className="space-y-3">
+                      {Object.entries(performanceMetrics.api_performance).map(([endpoint, metrics]) => (
+                        <div key={endpoint} className="border-b border-gray-700/50 pb-2">
+                          <h4 className="text-blue-300 font-medium">{endpoint}</h4>
+                          <div className="grid grid-cols-2 gap-2 text-sm">
+                            <div>Avg: {metrics.avg_response_time_ms}ms</div>
+                            <div>P95: {metrics.p95_response_time_ms}ms</div>
+                            <div>Requests: {metrics.request_count}</div>
+                            <div>Error Rate: {(metrics.error_rate * 100).toFixed(1)}%</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
 
-            {errors.length === 0 ? (
-              <div className="text-gray-400 text-center py-8">No errors logged</div>
-            ) : (
-              <div className="space-y-3">
-                {errors.map((error) => (
-                  <div key={error.id} className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <div className="flex items-center space-x-3 mb-2">
-                          <span className="text-red-400 text-sm font-medium">
-                            {error.component || 'Unknown'}
+                  {/* WebSocket Performance */}
+                  <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/50">
+                    <h3 className="text-lg font-semibold text-white mb-4">🔌 WebSocket Performance</h3>
+                    <div className="space-y-4">
+                      <div>
+                        <h4 className="text-blue-300 font-medium mb-2">Message Delivery</h4>
+                        <div className="grid grid-cols-2 gap-2 text-sm">
+                          <div>Avg Latency: {performanceMetrics.websocket_performance.message_delivery.avg_latency_ms}ms</div>
+                          <div>P95 Latency: {performanceMetrics.websocket_performance.message_delivery.p95_latency_ms}ms</div>
+                          <div>Messages: {performanceMetrics.websocket_performance.message_delivery.messages_sent}</div>
+                          <div>Success Rate: {(performanceMetrics.websocket_performance.message_delivery.delivery_success_rate * 100).toFixed(1)}%</div>
+                        </div>
+                      </div>
+                      <div>
+                        <h4 className="text-blue-300 font-medium mb-2">Polling</h4>
+                        <div className="grid grid-cols-2 gap-2 text-sm">
+                          <div>Avg Interval: {performanceMetrics.websocket_performance.polling.avg_poll_interval_ms}ms</div>
+                          <div>Last Duration: {performanceMetrics.websocket_performance.polling.last_poll_duration_ms}ms</div>
+                          <div>Success Rate: {(performanceMetrics.websocket_performance.polling.poll_success_rate * 100).toFixed(1)}%</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* System Trends */}
+                <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/50">
+                  <h3 className="text-lg font-semibold text-white mb-4">📈 System Trends (Last {performanceMetrics.system_trends.trend_duration_minutes} minutes)</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                      <h4 className="text-blue-300 font-medium mb-2">Memory Usage (%)</h4>
+                      <div className="flex space-x-1">
+                        {performanceMetrics.system_trends.memory_percent.map((value, index) => (
+                          <div
+                            key={index}
+                            className="bg-blue-600 rounded-t"
+                            style={{ height: `${value / 2}px`, width: '20px' }}
+                            title={`${value}%`}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <h4 className="text-blue-300 font-medium mb-2">CPU Usage (%)</h4>
+                      <div className="flex space-x-1">
+                        {performanceMetrics.system_trends.cpu_percent.map((value, index) => (
+                          <div
+                            key={index}
+                            className="bg-green-600 rounded-t"
+                            style={{ height: `${value * 2}px`, width: '20px' }}
+                            title={`${value}%`}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Recommendations */}
+                <div className="bg-blue-900/20 rounded-xl p-4 border border-blue-700/50">
+                  <h3 className="text-lg font-semibold text-blue-300 mb-4">💡 Recommendations</h3>
+                  <ul className="space-y-2">
+                    {performanceMetrics.recommendations.map((rec, index) => (
+                      <li key={index} className="text-blue-200 text-sm flex items-start">
+                        <span className="text-blue-400 mr-2">•</span>
+                        {rec}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            )}
+
+            {/* WebSocket Events Tab */}
+            {activeTab === 'events' && (
+              <div className="space-y-6">
+                <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/50">
+                  <h3 className="text-lg font-semibold text-white mb-4">🔌 WebSocket Events (Last 20)</h3>
+                  <div className="space-y-2 max-h-96 overflow-y-auto">
+                    {wsEvents.map((event, index) => (
+                      <div key={index} className="bg-gray-700/50 rounded-lg p-3">
+                        <div className="flex justify-between items-start">
+                          <span className="text-gray-300 text-sm">{event.timestamp}</span>
+                          <span className="text-blue-400 text-xs bg-blue-800/50 px-2 py-1 rounded">
+                            Seq: {event.sequence}
                           </span>
-                          <span className="text-gray-500 text-xs">
-                            {new Date(error.timestamp).toLocaleTimeString()}
+                        </div>
+                        <div className="flex justify-between items-center mt-2">
+                          <span className="text-white font-medium">{event.type}</span>
+                          <span className="text-gray-400 text-sm">
+                            {event.channel || 'N/A'}
                           </span>
-                          {error.traceId && (
-                            <span className="text-blue-400 text-xs font-mono">
-                              Trace: {error.traceId.slice(0, 8)}...
+                        </div>
+                        <div className="flex justify-between items-center mt-1">
+                          <span className="text-gray-400 text-sm">
+                            Connections: {event.connection_count}
+                          </span>
+                          {Object.keys(event.details).length > 0 && (
+                            <span className="text-gray-500 text-xs">
+                              {Object.keys(event.details).length} details
                             </span>
                           )}
                         </div>
-                        <div className="text-white text-sm mb-2">{error.message}</div>
-                        {error.error && (
-                          <div className="text-gray-400 text-xs font-mono bg-gray-900 p-2 rounded">
-                            {error.error.stack || error.error.toString()}
-                          </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Recent Logs Tab */}
+            {activeTab === 'logs' && (
+              <div className="space-y-6">
+                <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/50">
+                  <h3 className="text-lg font-semibold text-white mb-4">📝 Recent Logs</h3>
+                  <p className="text-gray-400 text-sm mb-4">
+                    This endpoint currently returns mock data. In production, it would read from actual log files.
+                  </p>
+                  <div className="space-y-2 max-h-96 overflow-y-auto">
+                    {[
+                      {
+                        timestamp: "2025-08-21 22:05:37.142",
+                        level: "DEBUG",
+                        module: "app.ws.live",
+                        message: "Emitted pnl delta: seq=36",
+                        trace_id: null
+                      },
+                      {
+                        timestamp: "2025-08-21 22:05:37.140",
+                        level: "DEBUG",
+                        module: "app.services.dhan_client",
+                        message: "Created PnL model: totals=PnLTotals(realized=0.0, unrealized=2168861.24, day=2168861.24, currency='INR')",
+                        trace_id: null
+                      },
+                      {
+                        timestamp: "2025-08-21 22:05:37.125",
+                        level: "DEBUG",
+                        module: "app.services.dhan_client",
+                        message: "PnL consistency check passed: drift=₹0.00",
+                        trace_id: null
+                      }
+                    ].map((log, index) => (
+                      <div key={index} className={`bg-gray-700/50 rounded-lg p-3 border-l-4 ${
+                        log.level === 'ERROR' ? 'border-l-red-500' :
+                        log.level === 'WARNING' ? 'border-l-yellow-500' :
+                        log.level === 'INFO' ? 'border-l-blue-500' :
+                        'border-l-gray-500'
+                      }`}>
+                        <div className="flex justify-between items-start">
+                          <span className="text-gray-300 text-sm">{log.timestamp}</span>
+                          <span className={`text-xs px-2 py-1 rounded ${
+                            log.level === 'ERROR' ? 'bg-red-600 text-white' :
+                            log.level === 'WARNING' ? 'bg-yellow-600 text-white' :
+                            log.level === 'INFO' ? 'bg-blue-600 text-white' :
+                            'bg-gray-600 text-white'
+                          }`}>
+                            {log.level}
+                          </span>
+                        </div>
+                        <div className="text-white font-medium mt-1">{log.module}</div>
+                        <div className="text-gray-300 text-sm mt-1">{log.message}</div>
+                        {log.trace_id && (
+                          <div className="text-gray-400 text-xs mt-1">Trace ID: {log.trace_id}</div>
                         )}
                       </div>
-                      {error.traceId && (
-                        <button
-                          onClick={() => copyTraceIdBundle(error.traceId!)}
-                          className="ml-3 px-2 py-1 bg-gray-600 hover:bg-gray-700 text-white rounded text-xs whitespace-nowrap"
-                        >
-                          Copy Trace ID
-                        </button>
-                      )}
-                    </div>
+                    ))}
                   </div>
-                ))}
+                </div>
               </div>
             )}
           </div>
 
-          {/* Quick Actions */}
-          <div className="p-6 border-t border-gray-700">
-            <h3 className="text-lg font-semibold text-white mb-4">Quick Actions</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <button
-                onClick={checkApiHealth}
-                className="p-3 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm"
-              >
-                🔄 Refresh API Status
-              </button>
-              <button
-                onClick={() => {
-                  errorLogger.clearErrors();
-                }}
-                className="p-3 bg-gray-600 hover:bg-gray-700 text-white rounded text-sm"
-              >
-                🗑️ Clear Error Logs
-              </button>
+          {/* Footer */}
+          <div className="bg-gray-800/50 p-4 border-t border-gray-700/50">
+            <div className="flex justify-between items-center text-sm text-gray-400">
+              <span>Press Ctrl+D to toggle debug panel</span>
+              {lastRefresh && (
+                <span>Last refresh: {lastRefresh.toLocaleTimeString()}</span>
+              )}
             </div>
           </div>
-        </div>
-      </div>
-    </div>
+        </motion.div>
+      </motion.div>
+    </AnimatePresence>
   );
-}
+};
+
+export default DebugPanel;

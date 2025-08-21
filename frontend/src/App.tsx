@@ -5,6 +5,7 @@ import Positions from './components/Positions';
 import Holdings from './components/Holdings';
 import Orders from './components/Orders';
 import Trades from './components/Trades';
+import DebugPanel from './components/DebugPanel';
 import { useWebSocket, ConnectionState } from './api';
 
 function App() {
@@ -187,6 +188,9 @@ function App() {
           </div>
         </div>
       </footer>
+
+      {/* Debug Panel */}
+      <DebugPanel />
     </div>
   );
 }

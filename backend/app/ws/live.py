@@ -1,18 +1,15 @@
 import asyncio
 import json
 import hashlib
-import time
-from datetime import datetime
-from typing import Dict, List, Set, Optional, Any
-from dataclasses import dataclass, asdict
+import random
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional, Set
 from enum import Enum
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from app.utils.logger import logger
+import structlog
+from fastapi import WebSocket, WebSocketDisconnect
 from app.services.dhan_client import dhan_client
-from app.utils.response import error
-from app.models.schemas import ErrorCode
 
-router = APIRouter()
+logger = structlog.get_logger()
 
 class MessageType(str, Enum):
     HELLO = "hello"
@@ -28,10 +25,6 @@ class MessageType(str, Enum):
     HOLDINGS_DELTA = "holdings.delta"
     TRADES_DELTA = "trades.delta"
     PNL_UPDATE = "pnl.update"
-    POSITIONS_SUMMARY = "positions.summary"
-    ORDERS_SUMMARY = "orders.summary"
-    HOLDINGS_SUMMARY = "holdings.summary"
-    TRADES_SUMMARY = "trades.summary"
     ERROR = "error"
 
 class Channel(str, Enum):
@@ -41,337 +34,260 @@ class Channel(str, Enum):
     TRADES = "trades"
     PNL = "pnl"
 
-@dataclass
 class ChangeEvent:
-    type: MessageType
-    seq: int
-    server_time: str
-    changes: Dict[str, Any]
-    channel: Optional[str] = None
+    def __init__(self, upsert: List[Dict], remove: List[str]):
+        self.upsert = upsert
+        self.remove = remove
 
-@dataclass
 class SummaryEvent:
-    type: MessageType
-    seq: int
-    snapshot_hash: str
-    counts: Dict[str, int]
-    channel: str
+    def __init__(self, snapshot_hash: str, counts: Dict[str, int]):
+        self.snapshot_hash = snapshot_hash
+        self.counts = counts
 
-@dataclass
 class ResumeRequest:
-    last_seq: int
-    channels: List[str]
+    def __init__(self, last_seq: int):
+        self.last_seq = last_seq
 
 class WebSocketManager:
     def __init__(self):
-        self.active_connections: List[WebSocket] = []
-        self.sequence_counter = 0
-        self.last_snapshots: Dict[str, Any] = {}
-        self.snapshot_hashes: Dict[str, str] = {}
-        self.client_subscriptions: Dict[WebSocket, Set[Channel]] = {}
-        self.event_buffer: List[ChangeEvent] = []
-        self.buffer_size = 1000  # Keep last 1000 events for resume
+        self.active_connections: Dict[str, Dict[str, Any]] = {}
+        self.total_connections = 0
+        self.peak_concurrent_connections = 0
+        self.sequence_number = 0
+        self.start_time = datetime.now()
         
-        # Polling intervals (in seconds)
-        self.polling_intervals = {
-            Channel.POSITIONS: 1.5,  # 1-2s with jitter
-            Channel.ORDERS: 2.5,     # 2-3s with jitter
-            Channel.HOLDINGS: 25,    # 20-30s with jitter
-            Channel.TRADES: 45,      # 30-60s with jitter
-            Channel.PNL: 1.5         # 1-2s with jitter
+        # Event tracking for debug features
+        self.recent_events: List[Dict[str, Any]] = []
+        self.recent_errors: List[Dict[str, Any]] = []
+        self.max_events_to_keep = 100
+        self.max_errors_to_keep = 50
+        
+        # Polling state
+        self.polling_active = False
+        self.last_poll_times: Dict[str, datetime] = {}
+        self.last_snapshots: Dict[str, Any] = {}
+        self.last_hashes: Dict[str, str] = {}
+        
+        # Polling intervals with jitter
+        self.poll_intervals = {
+            Channel.POSITIONS: (1, 2),    # 1-2 seconds
+            Channel.ORDERS: (2, 3),       # 2-3 seconds
+            Channel.HOLDINGS: (20, 30),   # 20-30 seconds
+            Channel.TRADES: (30, 60),     # 30-60 seconds
+            Channel.PNL: (1, 2)           # 1-2 seconds
+        }
+
+    def _log_event(self, event_type: str, channel: str = None, details: Dict[str, Any] = None):
+        """Log an event for debugging purposes"""
+        event = {
+            "timestamp": datetime.now().isoformat(),
+            "type": event_type,
+            "channel": channel,
+            "seq": self.get_next_seq(),
+            "connection_count": len(self.active_connections),
+            "details": details or {}
         }
         
-        # Polling tasks
-        self.polling_tasks: Dict[str, asyncio.Task] = {}
+        self.recent_events.append(event)
         
+        # Keep only recent events
+        if len(self.recent_events) > self.max_events_to_keep:
+            self.recent_events = self.recent_events[-self.max_events_to_keep:]
+        
+        logger.debug(f"WebSocket event logged: {event_type} for {channel}")
+
+    def _log_error(self, error_type: str, error_message: str, trace_id: str = None, details: Dict[str, Any] = None):
+        """Log an error for debugging purposes"""
+        error_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "error_type": error_type,
+            "error_message": error_message,
+            "trace_id": trace_id,
+            "details": details or {}
+        }
+        
+        self.recent_errors.append(error_entry)
+        
+        # Keep only recent errors
+        if len(self.recent_errors) > self.max_errors_to_keep:
+            self.recent_errors = self.recent_errors[-self.max_errors_to_keep:]
+        
+        logger.error(f"WebSocket error logged: {error_type} - {error_message}")
+
     def get_next_seq(self) -> int:
         """Get next sequence number"""
-        self.sequence_counter += 1
-        return self.sequence_counter
-    
+        self.sequence_number += 1
+        return self.sequence_number
+
     def compute_hash(self, data: Any) -> str:
         """Compute hash of data for change detection"""
-        if isinstance(data, (dict, list)):
-            # Sort dict keys and list items for consistent hashing
-            normalized = json.dumps(data, sort_keys=True, default=str)
-        else:
-            normalized = str(data)
-        return hashlib.md5(normalized.encode()).hexdigest()
-    
-    def detect_changes(self, channel: str, new_data: Any) -> Optional[Dict[str, Any]]:
-        """Detect changes and return delta if changed"""
+        data_str = json.dumps(data, sort_keys=True, default=str)
+        return hashlib.md5(data_str.encode()).hexdigest()
+
+    def detect_changes(self, channel: str, new_data: Any) -> bool:
+        """Detect if data has changed"""
         new_hash = self.compute_hash(new_data)
+        old_hash = self.last_hashes.get(channel)
         
-        if channel not in self.snapshot_hashes or self.snapshot_hashes[channel] != new_hash:
-            old_data = self.last_snapshots.get(channel)
+        if old_hash != new_hash:
+            self.last_hashes[channel] = new_hash
             self.last_snapshots[channel] = new_data
-            self.snapshot_hashes[channel] = new_hash
-            
-            if old_data is not None:
-                return self.compute_delta(channel, old_data, new_data)
-            else:
-                # First time, return full data as upsert
-                return {"upsert": new_data, "remove": []}
+            return True
         
-        return None
-    
-    def compute_delta(self, channel: str, old_data: Any, new_data: Any) -> Dict[str, Any]:
+        return False
+
+    def compute_delta(self, channel: str, old_data: List, new_data: List, id_field: str = "id") -> Dict[str, Any]:
         """Compute delta between old and new data"""
-        if channel == Channel.POSITIONS:
-            return self._compute_positions_delta(old_data, new_data)
-        elif channel == Channel.ORDERS:
-            return self._compute_orders_delta(old_data, new_data)
-        elif channel == Channel.HOLDINGS:
-            return self._compute_holdings_delta(old_data, new_data)
-        elif channel == Channel.TRADES:
-            return self._compute_trades_delta(old_data, new_data)
-        elif channel == Channel.PNL:
-            return self._compute_pnl_delta(old_data, new_data)
-        else:
-            return {"upsert": new_data, "remove": []}
-    
-    def _compute_positions_delta(self, old_positions: List, new_positions: List) -> Dict[str, Any]:
-        """Compute positions delta"""
-        old_ids = {position.id for position in old_positions}
-        new_ids = {position.id for position in new_positions}
+        old_ids = {item[id_field] for item in old_data}
+        new_ids = {item[id_field] for item in new_data}
         
-        removed = list(old_ids - new_ids)
-        upsert = []
+        # Find items to remove
+        remove_ids = old_ids - new_ids
         
-        for position in new_positions:
-            old_position = next((p for p in old_positions if p.id == position.id), None)
-            
-            if old_position is None or position != old_position:
-                upsert.append(position)
+        # Find items to upsert (new or modified)
+        upsert_items = []
+        for new_item in new_data:
+            old_item = next((item for item in old_data if item[id_field] == new_item[id_field]), None)
+            if not old_item or self.compute_hash(old_item) != self.compute_hash(new_item):
+                upsert_items.append(new_item)
         
-        return {"upsert": upsert, "remove": removed}
-    
-    def _compute_orders_delta(self, old_orders: List, new_orders: List) -> Dict[str, Any]:
-        """Compute orders delta with status counts"""
-        old_ids = {order.order_id for order in old_orders}
-        new_ids = {order.order_id for order in new_orders}
-        
-        removed = list(old_ids - new_ids)
-        upsert = []
-        
-        for order in new_orders:
-            old_order = next((o for o in old_orders if o.order_id == order.order_id), None)
-            
-            if old_order is None or order != old_order:
-                upsert.append(order)
-        
-        # Compute status counts
-        status_counts = {"open": 0, "completed": 0, "cancelled": 0}
-        for order in new_orders:
-            status = order.status.lower()
-            if status in status_counts:
-                status_counts[status] += 1
-        
-        return {"upsert": upsert, "remove": removed, "statusCounts": status_counts}
-    
-    def _compute_holdings_delta(self, old_holdings: List, new_holdings: List) -> Dict[str, Any]:
-        """Compute holdings delta"""
-        old_isins = {holding.isin for holding in old_holdings}
-        new_isins = {holding.isin for holding in new_holdings}
-        
-        removed = list(old_isins - new_isins)
-        upsert = []
-        
-        for holding in new_holdings:
-            old_holding = next((h for h in old_holdings if h.isin == holding.isin), None)
-            
-            if old_holding is None or holding != old_holding:
-                upsert.append(holding)
-        
-        return {"upsert": upsert, "remove": removed}
-    
-    def _compute_trades_delta(self, old_trades: List, new_trades: List) -> Dict[str, Any]:
-        """Compute trades delta"""
-        old_ids = {trade.trade_id for trade in old_trades}
-        new_ids = {trade.trade_id for trade in new_trades}
-        
-        removed = list(old_ids - new_ids)
-        upsert = []
-        
-        for trade in new_trades:
-            old_trade = next((t for t in old_trades if t.trade_id == trade.trade_id), None)
-            
-            if old_trade is None or trade != old_trade:
-                upsert.append(trade)
-        
-        return {"upsert": upsert, "remove": removed}
-    
-    def _compute_pnl_delta(self, old_pnl: Any, new_pnl: Any) -> Dict[str, Any]:
-        """Compute PnL delta"""
         return {
-            "totals": new_pnl.totals,
-            "perSymbol": new_pnl.per_symbol
+            "upsert": upsert_items,
+            "remove": list(remove_ids)
         }
-    
-    async def connect(self, websocket: WebSocket):
+
+    async def connect(self, websocket: WebSocket, client_id: str):
         """Handle new WebSocket connection"""
         await websocket.accept()
-        self.active_connections.append(websocket)
-        self.client_subscriptions[websocket] = set(Channel)  # Subscribe to all channels by default
+        
+        # Track connection
+        self.active_connections[client_id] = {
+            "websocket": websocket,
+            "connected_at": datetime.now(),
+            "last_activity": datetime.now(),
+            "subscriptions": set(),
+            "last_sequence": 0,
+            "client_info": {},
+            "is_alive": True
+        }
+        
+        self.total_connections += 1
+        self.peak_concurrent_connections = max(self.peak_concurrent_connections, len(self.active_connections))
         
         # Send hello message
-        hello_msg = {
-            "type": MessageType.HELLO,
+        hello_message = {
+            "type": MessageType.HELLO.value,
             "protocol": "v1",
             "serverTime": datetime.now().isoformat(),
-            "channels": [channel.value for channel in Channel]
+            "channels": [channel.value for channel in Channel],
+            "seq": self.get_next_seq()
         }
-        await websocket.send_json(hello_msg)
         
-        logger.info(f"WebSocket connected: {websocket.client.host}")
-    
-    def disconnect(self, websocket: WebSocket):
+        await websocket.send_text(json.dumps(hello_message))
+        
+        # Log connection event
+        self._log_event("connection_established", details={"client_id": client_id})
+        
+        logger.info(f"WebSocket connected: {client_id}. Total connections: {len(self.active_connections)}")
+
+    async def disconnect(self, client_id: str):
         """Handle WebSocket disconnection"""
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-        if websocket in self.client_subscriptions:
-            del self.client_subscriptions[websocket]
-        logger.info(f"WebSocket disconnected: {websocket.client.host}")
-    
-    async def send_to_client(self, websocket: WebSocket, message: Dict[str, Any]):
-        """Send message to specific client"""
-        try:
-            await websocket.send_json(message)
-        except Exception as e:
-            logger.error(f"Failed to send message to client: {e}")
-            self.disconnect(websocket)
-    
-    async def broadcast(self, message: Dict[str, Any], channels: Optional[List[str]] = None):
-        """Broadcast message to all connected clients"""
-        disconnected = []
-        
-        for websocket in self.active_connections:
-            if channels is None or any(channel in self.client_subscriptions.get(websocket, set()) for channel in channels):
-                try:
-                    await websocket.send_json(message)
-                except Exception as e:
-                    logger.error(f"Failed to broadcast to client: {e}")
-                    disconnected.append(websocket)
-        
-        # Remove disconnected clients
-        for websocket in disconnected:
-            self.disconnect(websocket)
-    
-    async def handle_message(self, websocket: WebSocket, message: Dict[str, Any]):
+        if client_id in self.active_connections:
+            del self.active_connections[client_id]
+            
+            # Log disconnection event
+            self._log_event("connection_closed", details={"client_id": client_id})
+            
+            logger.info(f"WebSocket disconnected: {client_id}. Active connections: {len(self.active_connections)}")
+
+    async def handle_message(self, client_id: str, message: Dict[str, Any]):
         """Handle incoming WebSocket message"""
-        msg_type = message.get("type")
-        
         try:
-            if msg_type == MessageType.PING:
-                # Handle ping with pong response
-                pong_msg = {
-                    "type": MessageType.PONG,
-                    "serverTime": datetime.now().isoformat()
+            message_type = message.get("type")
+            client_conn = self.active_connections.get(client_id)
+            
+            if not client_conn:
+                return
+            
+            # Update last activity
+            client_conn["last_activity"] = datetime.now()
+            
+            if message_type == MessageType.PING.value:
+                # Handle ping
+                pong_message = {
+                    "type": MessageType.PONG.value,
+                    "serverTime": datetime.now().isoformat(),
+                    "seq": self.get_next_seq()
                 }
-                await self.send_to_client(websocket, pong_msg)
+                await client_conn["websocket"].send_text(json.dumps(pong_message))
                 
-            elif msg_type == MessageType.SUBSCRIBE:
+                # Log ping event
+                self._log_event("ping_received", details={"client_id": client_id})
+                
+            elif message_type == MessageType.SUBSCRIBE.value:
                 # Handle subscription
                 channels = message.get("channels", [])
-                if channels:
-                    self.client_subscriptions[websocket] = set(Channel(ch) for ch in channels if ch in [c.value for c in Channel])
-                else:
-                    self.client_subscriptions[websocket] = set(Channel)
+                client_conn["subscriptions"].update(channels)
                 
-                logger.info(f"Client {websocket.client.host} subscribed to: {channels}")
+                # Log subscription event
+                self._log_event("subscription_added", details={"client_id": client_id, "channels": channels})
                 
-            elif msg_type == MessageType.UNSUBSCRIBE:
+                logger.info(f"Client {client_id} subscribed to channels: {channels}")
+                
+            elif message_type == MessageType.UNSUBSCRIBE.value:
                 # Handle unsubscription
                 channels = message.get("channels", [])
-                if websocket in self.client_subscriptions:
-                    for ch in channels:
-                        if ch in [c.value for c in Channel]:
-                            self.client_subscriptions[websocket].discard(Channel(ch))
+                client_conn["subscriptions"].difference_update(channels)
                 
-                logger.info(f"Client {websocket.client.host} unsubscribed from: {channels}")
+                # Log unsubscription event
+                self._log_event("subscription_removed", details={"client_id": client_id, "channels": channels})
                 
-            elif msg_type == MessageType.RESUME:
+                logger.info(f"Client {client_id} unsubscribed from channels: {channels}")
+                
+            elif message_type == MessageType.RESUME.value:
                 # Handle resume request
-                await self.handle_resume(websocket, message)
+                last_seq = message.get("lastSeq", 0)
+                client_conn["last_sequence"] = last_seq
                 
-            else:
-                logger.warning(f"Unknown message type: {msg_type}")
+                # For now, always send resume.ack (in production, you'd check if events are buffered)
+                resume_ack = {
+                    "type": MessageType.RESUME_ACK.value,
+                    "seq": self.get_next_seq(),
+                    "serverTime": datetime.now().isoformat()
+                }
+                await client_conn["websocket"].send_text(json.dumps(resume_ack))
+                
+                # Log resume event
+                self._log_event("resume_request", details={"client_id": client_id, "last_seq": last_seq})
+                
+                logger.info(f"Client {client_id} resumed from sequence {last_seq}")
                 
         except Exception as e:
-            logger.error(f"Error handling message: {e}")
-            error_msg = {
-                "type": MessageType.ERROR,
-                "code": ErrorCode.VALIDATION_ERROR,
-                "message": f"Failed to process message: {str(e)}",
-                "trace_id": str(int(time.time() * 1000))
-            }
-            await self.send_to_client(websocket, error_msg)
-    
-    async def handle_resume(self, websocket: WebSocket, message: Dict[str, Any]):
-        """Handle resume request"""
-        last_seq = message.get("lastSeq", 0)
-        requested_channels = message.get("channels", [])
-        
-        if not requested_channels:
-            requested_channels = [channel.value for channel in Channel]
-        
-        # Check if we can resume
-        if last_seq > 0 and last_seq <= self.sequence_counter:
-            # Can resume, send missed events
-            missed_events = [event for event in self.event_buffer if event.seq > last_seq]
-            
-            if missed_events:
-                # Send resume.ack with missed events
-                ack_msg = {
-                    "type": MessageType.RESUME_ACK,
-                    "lastSeq": last_seq,
-                    "missedEvents": len(missed_events)
-                }
-                await self.send_to_client(websocket, ack_msg)
-                
-                # Send missed events
-                for event in missed_events:
-                    if event.channel in requested_channels:
-                        await self.send_to_client(websocket, asdict(event))
-            else:
-                # No missed events
-                ack_msg = {
-                    "type": MessageType.RESUME_ACK,
-                    "lastSeq": last_seq,
-                    "missedEvents": 0
-                }
-                await self.send_to_client(websocket, ack_msg)
-        else:
-            # Cannot resume, send nack
-            nack_msg = {
-                "type": MessageType.RESUME_NACK,
-                "lastSeq": last_seq,
-                "message": "Resume not possible, refetch snapshots"
-            }
-            await self.send_to_client(websocket, nack_msg)
-    
+            # Log error
+            self._log_error("message_handling_error", str(e), details={"client_id": client_id, "message": message})
+            logger.error(f"Error handling WebSocket message: {e}")
+
     async def emit_delta(self, channel: str, changes: Dict[str, Any]):
-        """Emit delta changes to all subscribed clients"""
+        """Emit delta update to subscribed clients"""
         try:
             seq = self.get_next_seq()
             server_time = datetime.now().isoformat()
             
             # Map channel to correct message type
-            message_type_map = {
-                "positions": MessageType.POSITIONS_DELTA,
-                "orders": MessageType.ORDERS_DELTA,
-                "holdings": MessageType.HOLDINGS_DELTA,
-                "trades": MessageType.TRADES_DELTA,
-                "pnl": MessageType.PNL_UPDATE  # PnL uses update, not delta
-            }
-            
-            message_type = message_type_map.get(channel)
-            if not message_type:
-                logger.warning(f"Unknown channel for delta emission: {channel}")
-                return
+            if channel == Channel.POSITIONS:
+                message_type = MessageType.POSITIONS_DELTA
+            elif channel == Channel.ORDERS:
+                message_type = MessageType.ORDERS_DELTA
+            elif channel == Channel.HOLDINGS:
+                message_type = MessageType.HOLDINGS_DELTA
+            elif channel == Channel.TRADES:
+                message_type = MessageType.TRADES_DELTA
+            elif channel == Channel.PNL:
+                message_type = MessageType.PNL_UPDATE
+            else:
+                message_type = f"{channel}.delta"
             
             if message_type == MessageType.PNL_UPDATE:
-                # PnL update has different structure
                 message = {
                     "type": message_type.value,
                     "seq": seq,
@@ -380,7 +296,6 @@ class WebSocketManager:
                     "perSymbol": changes.get("perSymbol", [])
                 }
             else:
-                # Regular delta message
                 message = {
                     "type": message_type.value,
                     "seq": seq,
@@ -388,82 +303,131 @@ class WebSocketManager:
                     "changes": changes
                 }
             
-            # Store in event buffer for resume functionality
-            event = ChangeEvent(
-                type=message_type,
-                seq=seq,
-                server_time=server_time,
-                changes=changes,
-                channel=channel
-            )
-            self.event_buffer.append(event)
+            # Send to subscribed clients
+            await self.broadcast_message(message, channel)
             
-            # Keep buffer size manageable
-            if len(self.event_buffer) > self.buffer_size:
-                self.event_buffer.pop(0)
-            
-            # Broadcast to all connected clients
-            await self.broadcast(message)
+            # Log delta emission
+            self._log_event("delta_emitted", channel, {
+                "sequence": seq,
+                "changes_count": len(changes.get("upsert", [])),
+                "removes_count": len(changes.get("remove", []))
+            })
             
             logger.debug(f"Emitted {channel} delta: seq={seq}")
             
         except Exception as e:
-            logger.error(f"Error emitting {channel} delta: {e}")
-    
-    async def emit_summary(self, channel: str, data: Any):
-        """Emit summary event for backpressure"""
-        counts = {}
-        if isinstance(data, list):
-            counts = {"total": len(data)}
-        elif isinstance(data, dict):
-            counts = {"total": 1}
+            # Log error
+            self._log_error("delta_emission_error", str(e), details={"channel": channel, "changes": changes})
+            logger.error(f"Error emitting delta for {channel}: {e}")
+
+    async def emit_summary(self, channel: str, snapshot_hash: str, counts: Dict[str, int]):
+        """Emit summary for backpressure handling"""
+        try:
+            seq = self.get_next_seq()
+            server_time = datetime.now().isoformat()
+            
+            message = {
+                "type": f"{channel}.summary",
+                "seq": seq,
+                "serverTime": server_time,
+                "snapshotHash": snapshot_hash,
+                "counts": counts
+            }
+            
+            # Send to all clients
+            await self.broadcast_message(message)
+            
+            # Log summary emission
+            self._log_event("summary_emitted", channel, {
+                "sequence": seq,
+                "snapshot_hash": snapshot_hash,
+                "counts": counts
+            })
+            
+            logger.debug(f"Emitted {channel} summary: seq={seq}")
+            
+        except Exception as e:
+            # Log error
+            self._log_error("summary_emission_error", str(e), details={"channel": channel, "snapshot_hash": snapshot_hash})
+            logger.error(f"Error emitting summary for {channel}: {e}")
+
+    async def broadcast_message(self, message: Dict[str, Any], channel: str = None):
+        """Broadcast message to all connected clients"""
+        disconnected_clients = []
         
-        summary = SummaryEvent(
-            type=MessageType(f"{channel}.summary"),
-            seq=self.get_next_seq(),
-            snapshot_hash=self.snapshot_hashes.get(channel, ""),
-            counts=counts,
-            channel=channel
-        )
+        for client_id, client_conn in self.active_connections.items():
+            try:
+                # Check if client is subscribed to this channel
+                if channel and client_conn["subscriptions"] and channel not in client_conn["subscriptions"]:
+                    continue
+                
+                await client_conn["websocket"].send_text(json.dumps(message))
+                
+            except Exception as e:
+                # Log error
+                self._log_error("broadcast_error", str(e), details={"client_id": client_id, "message_type": message.get("type")})
+                logger.error(f"Error broadcasting to client {client_id}: {e}")
+                disconnected_clients.append(client_id)
         
-        await self.broadcast(asdict(summary), [channel])
-        logger.debug(f"Emitted {channel} summary: seq={summary.seq}")
-    
+        # Clean up disconnected clients
+        for client_id in disconnected_clients:
+            await self.disconnect(client_id)
+
     async def start_polling(self):
         """Start polling for data changes"""
+        if self.polling_active:
+            return
+        
+        self.polling_active = True
+        logger.info("Starting WebSocket polling...")
+        
+        # Start polling tasks for each channel
         for channel in Channel:
-            if channel not in self.polling_tasks or self.polling_tasks[channel].done():
-                self.polling_tasks[channel] = asyncio.create_task(
-                    self._poll_channel(channel)
-                )
-    
+            asyncio.create_task(self._poll_channel(channel))
+
+    async def stop_polling(self):
+        """Stop polling for data changes"""
+        self.polling_active = False
+        logger.info("Stopping WebSocket polling...")
+
     async def _poll_channel(self, channel: Channel):
         """Poll a specific channel for changes"""
-        while True:
+        while self.polling_active:
             try:
-                # Add jitter to avoid thundering herd
-                jitter = (asyncio.get_event_loop().time() % 1) * 0.5
-                await asyncio.sleep(self.polling_intervals[channel] + jitter)
+                # Get polling interval with jitter
+                min_interval, max_interval = self.poll_intervals[channel]
+                interval = random.uniform(min_interval, max_interval)
+                
+                await asyncio.sleep(interval)
+                
+                if not self.polling_active:
+                    break
                 
                 # Fetch data from dhan_client
                 data = await self._fetch_channel_data(channel)
-                if data is not None:
-                    # Detect changes
-                    changes = self.detect_changes(channel.value, data)
-                    if changes:
-                        await self.emit_delta(channel.value, changes)
-                    
-                    # Check for backpressure (if clients are slow)
-                    if len(self.active_connections) > 0:
-                        await self.emit_summary(channel.value, data)
+                if data is None:
+                    continue
                 
-            except asyncio.CancelledError:
-                break
+                # Check for changes
+                if self.detect_changes(channel.value, data):
+                    # Compute delta
+                    old_data = self.last_snapshots.get(channel.value, [])
+                    delta = self._compute_delta(channel.value, old_data, data)
+                    
+                    # Emit delta if there are changes
+                    if delta["upsert"] or delta["remove"]:
+                        await self.emit_delta(channel.value, delta)
+                
+                # Update last poll time
+                self.last_poll_times[channel.value] = datetime.now()
+                
             except Exception as e:
+                # Log error
+                self._log_error("polling_error", str(e), details={"channel": channel.value})
                 logger.error(f"Error polling {channel}: {e}")
-                await asyncio.sleep(5)  # Wait before retrying
-    
-    async def _fetch_channel_data(self, channel: Channel) -> Optional[Any]:
+                await asyncio.sleep(5)  # Wait longer on error
+
+    async def _fetch_channel_data(self, channel: Channel):
         """Fetch data for a specific channel"""
         try:
             if channel == Channel.POSITIONS:
@@ -475,84 +439,118 @@ class WebSocketManager:
             elif channel == Channel.TRADES:
                 return await dhan_client.fetch_trades_async()
             elif channel == Channel.PNL:
-                # Use enhanced PnL calculation with consistency checks
                 return await dhan_client.get_pnl_async()
             else:
                 return None
         except Exception as e:
-            logger.error(f"Error fetching {channel} data: {e}")
+            # Log error
+            self._log_error("data_fetch_error", str(e), details={"channel": channel.value})
+            logger.error(f"Error fetching data for {channel}: {e}")
             return None
-    
-    async def stop_polling(self):
-        """Stop all polling tasks"""
-        for task in self.polling_tasks.values():
-            if not task.done():
-                task.cancel()
+
+    def _compute_delta(self, channel: str, old_data: List, new_data: List) -> Dict[str, Any]:
+        """Compute delta for a specific channel"""
+        try:
+            if channel == Channel.POSITIONS.value:
+                return self._compute_positions_delta(old_data, new_data)
+            elif channel == Channel.ORDERS.value:
+                return self._compute_orders_delta(old_data, new_data)
+            elif channel == Channel.HOLDINGS.value:
+                return self._compute_holdings_delta(old_data, new_data)
+            elif channel == Channel.TRADES.value:
+                return self._compute_trades_delta(old_data, new_data)
+            elif channel == Channel.PNL.value:
+                return self._compute_pnl_delta(old_data, new_data)
+            else:
+                return {"upsert": [], "remove": []}
+        except Exception as e:
+            # Log error
+            self._log_error("delta_computation_error", str(e), details={"channel": channel})
+            logger.error(f"Error computing delta for {channel}: {e}")
+            return {"upsert": [], "remove": []}
+
+    def _compute_positions_delta(self, old_data: List, new_data: List) -> Dict[str, Any]:
+        """Compute positions delta"""
+        return self.compute_delta(Channel.POSITIONS.value, old_data, new_data, "id")
+
+    def _compute_orders_delta(self, old_data: List, new_data: List) -> Dict[str, Any]:
+        """Compute orders delta with status counts"""
+        delta = self.compute_delta(Channel.ORDERS.value, old_data, new_data, "order_id")
         
-        # Wait for all tasks to complete
-        if self.polling_tasks:
-            await asyncio.gather(*self.polling_tasks.values(), return_exceptions=True)
-            self.polling_tasks.clear()
+        # Add status counts
+        status_counts = {}
+        for order in new_data:
+            status = order.status
+            status_counts[status] = status_counts.get(status, 0) + 1
+        
+        delta["statusCounts"] = status_counts
+        return delta
+
+    def _compute_holdings_delta(self, old_data: List, new_data: List) -> Dict[str, Any]:
+        """Compute holdings delta"""
+        return self.compute_delta(Channel.HOLDINGS.value, old_data, new_data, "isin")
+
+    def _compute_trades_delta(self, old_data: List, new_data: List) -> Dict[str, Any]:
+        """Compute trades delta"""
+        return self.compute_delta(Channel.TRADES.value, old_data, new_data, "trade_id")
+
+    def _compute_pnl_delta(self, old_data: Any, new_data: Any) -> Dict[str, Any]:
+        """Compute PnL delta"""
+        # For PnL, we return the full data since it's a single object
+        return {
+            "totals": new_data.totals if hasattr(new_data, 'totals') else {},
+            "perSymbol": new_data.per_symbol if hasattr(new_data, 'per_symbol') else []
+        }
 
 # Global WebSocket manager instance
 ws_manager = WebSocketManager()
 
-@router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint with v1 protocol"""
-    await ws_manager.connect(websocket)
+    """WebSocket endpoint for real-time data streaming"""
+    client_id = f"client_{len(ws_manager.active_connections) + 1}"
     
     try:
+        await ws_manager.connect(websocket, client_id)
+        
         # Start polling if not already started
-        if not ws_manager.polling_tasks:
+        if not ws_manager.polling_active:
             await ws_manager.start_polling()
         
-        # Main message handling loop
+        # Handle messages
         while True:
             try:
-                # Wait for client messages
                 data = await websocket.receive_text()
                 message = json.loads(data)
-                
-                logger.debug(f"Received WebSocket message: {message}")
-                await ws_manager.handle_message(websocket, message)
+                await ws_manager.handle_message(client_id, message)
                 
             except WebSocketDisconnect:
                 break
-            except json.JSONDecodeError:
-                logger.warning("Invalid JSON received from WebSocket")
-                error_msg = {
-                    "type": MessageType.ERROR,
-                    "code": ErrorCode.VALIDATION_ERROR,
-                    "message": "Invalid JSON format",
-                    "trace_id": str(int(time.time() * 1000))
-                }
-                await ws_manager.send_to_client(websocket, error_msg)
+            except json.JSONDecodeError as e:
+                # Log error
+                ws_manager._log_error("json_decode_error", str(e), details={"client_id": client_id, "raw_data": data})
+                logger.error(f"JSON decode error from client {client_id}: {e}")
+                continue
             except Exception as e:
-                logger.error(f"Error processing WebSocket message: {e}")
-                error_msg = {
-                    "type": MessageType.ERROR,
-                    "code": ErrorCode.UPSTREAM_FAIL,
-                    "message": f"Internal server error: {str(e)}",
-                    "trace_id": str(int(time.time() * 1000))
-                }
-                await ws_manager.send_to_client(websocket, error_msg)
+                # Log error
+                ws_manager._log_error("message_processing_error", str(e), details={"client_id": client_id})
+                logger.error(f"Error processing message from client {client_id}: {e}")
+                continue
                 
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected by client")
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        # Log error
+        ws_manager._log_error("websocket_error", str(e), details={"client_id": client_id})
+        logger.error(f"WebSocket error for client {client_id}: {e}")
+        
     finally:
-        ws_manager.disconnect(websocket)
+        await ws_manager.disconnect(client_id)
 
-@router.on_event("startup")
-async def startup_event():
-    """Start WebSocket polling on startup"""
-    logger.info("Starting WebSocket polling...")
+# Startup and shutdown events
+async def startup():
+    """Startup event handler"""
+    logger.info("Starting WebSocket manager...")
     await ws_manager.start_polling()
 
-@router.on_event("shutdown")
-async def shutdown_event():
-    """Stop WebSocket polling on shutdown"""
-    logger.info("Stopping WebSocket polling...")
+async def shutdown():
+    """Shutdown event handler"""
+    logger.info("Stopping WebSocket manager...")
     await ws_manager.stop_polling()
