@@ -439,6 +439,7 @@ class WebSocketManager:
             elif channel == Channel.TRADES:
                 return await dhan_client.fetch_trades_async()
             elif channel == Channel.PNL:
+                # Use enhanced PnL calculation with consistency checks
                 return await dhan_client.get_pnl_async()
             else:
                 return None

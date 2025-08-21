@@ -81,13 +81,13 @@ class PnLTotals(BaseModel):
     unrealized: float = Field(..., description="Unrealized P&L")
     day: float = Field(..., description="Day's P&L")
     currency: str = Field(..., description="Currency (INR)")
-    updated_at: datetime = Field(..., description="Last update time")
-    trading_day: str = Field(..., description="Trading day")
 
 class PnL(BaseModel):
-    """PnL payload: { totals:{ realized, unrealized, day, currency, updatedAt, tradingDay }, perSymbol:[{symbol, side, qty, avg, ltp, unrealized, todayPnL}] }"""
+    """PnL payload: { totals:{ realized, unrealized, day, currency, updatedAt, tradingDay }, perSymbol:[{symbol, side, qty, avg, ltp, unrealized, todayPnL}], updatedAt, tradingDay }"""
     totals: PnLTotals = Field(..., description="P&L totals")
     per_symbol: List[PnLSymbol] = Field(..., alias="perSymbol", description="P&L per symbol")
+    updated_at: datetime = Field(..., alias="updatedAt", description="Last update time")
+    trading_day: str = Field(..., alias="tradingDay", description="Trading day")
 
 # Canonical error codes
 class ErrorCode(str, Enum):

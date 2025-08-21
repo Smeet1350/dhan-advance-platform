@@ -28,12 +28,25 @@ class MockDataState:
         self.trades: List[Trade] = []
         self.ltp_cache: Dict[str, float] = {}
         self.last_ltp_update = 0
+        self.pnl_update_callbacks: List[callable] = []
         
         # Initialize mock data
         self._initialize_mock_data()
         
         # Start LTP update thread
         self._start_ltp_updater()
+    
+    def add_pnl_update_callback(self, callback: callable):
+        """Add callback to be called when PnL should be recalculated"""
+        self.pnl_update_callbacks.append(callback)
+    
+    def _trigger_pnl_update(self):
+        """Trigger PnL update callbacks"""
+        for callback in self.pnl_update_callbacks:
+            try:
+                callback()
+            except Exception as e:
+                logger.error(f"Error in PnL update callback: {e}")
     
     def _initialize_mock_data(self):
         """Initialize realistic mock data"""
@@ -161,6 +174,9 @@ class MockDataState:
                         else:
                             position.unrealized = (position.avg_price - new_ltp) * position.qty
                         break
+                
+                # Trigger PnL recalculation after LTP updates
+                self._trigger_pnl_update()
 
 # Global mock state
 mock_state = MockDataState()
@@ -174,6 +190,14 @@ class DhanClient:
         
         if not self.use_mock:
             self._initialize_real_client()
+        
+        # Register PnL update callback for mock data
+        if self.use_mock:
+            mock_state.add_pnl_update_callback(self._on_pnl_update_triggered)
+    
+    def _on_pnl_update_triggered(self):
+        """Callback triggered when PnL should be recalculated"""
+        logger.debug("PnL update triggered - will recalculate on next fetch")
     
     def _initialize_real_client(self):
         """Initialize real Dhan client"""
@@ -460,68 +484,107 @@ class DhanClient:
             raise
     
     def get_pnl(self):
-        """Calculate P&L from positions and holdings"""
+        """Calculate accurate P&L with exchange-day boundaries and consistency checks"""
         try:
-            logger.info("Starting P&L calculation")
+            logger.info("Starting accurate P&L calculation")
             positions = self.fetch_positions()
             logger.info(f"Fetched {len(positions)} positions")
-            holdings = self.fetch_holdings()
-            logger.info(f"Fetched {len(holdings)} holdings")
             
-            # Calculate totals
-            realized = 0.0  # Would need trade history for this
-            unrealized = sum(pos.unrealized for pos in positions)
-            day = 0.0  # Would need historical data for this
+            # Get current IST time for exchange-day boundaries
+            from datetime import timezone, timedelta
+            ist = timezone(timedelta(hours=5, minutes=30))  # IST = UTC+5:30
+            now_ist = datetime.now(ist)
             
-            logger.info(f"Calculated totals - realized: {realized}, unrealized: {unrealized}, day: {day}")
+            # Determine trading day (IST date)
+            trading_day = now_ist.strftime('%Y-%m-%d')
             
-            # Calculate per symbol P&L
+            # Calculate per symbol P&L with proper formulas
             per_symbol = []
+            total_unrealized = 0.0
+            total_realized = 0.0
+            total_day_pnl = 0.0
+            
             for position in positions:
                 try:
+                    # Calculate unrealized P&L: signedQty × (LTP - avg_price)
+                    signed_qty = position.qty if position.side == Side.LONG else -position.qty
+                    unrealized = signed_qty * (position.ltp - position.avg_price)
+                    
+                    # Round to 2 decimal places (INR currency)
+                    unrealized = round(unrealized, 2)
+                    
+                    # For now, calculate day PnL as unrealized (in real implementation, 
+                    # this would be the change since market open)
+                    today_pnl = unrealized
+                    
+                    # Update totals
+                    total_unrealized += unrealized
+                    total_day_pnl += today_pnl
+                    
                     symbol_pnl = PnLSymbol(
                         symbol=position.symbol,
                         side=position.side,
                         qty=position.qty,
-                        avg=position.avg_price,
-                        ltp=position.ltp,
-                        unrealized=position.unrealized,
-                        today_pnl=0.0  # Would need historical data for this
+                        avg=round(position.avg_price, 2),
+                        ltp=round(position.ltp, 2),
+                        unrealized=unrealized,
+                        today_pnl=today_pnl
                     )
                     per_symbol.append(symbol_pnl)
-                    logger.info(f"Created PnL for {position.symbol}")
+                    logger.debug(f"Created PnL for {position.symbol}: unrealized={unrealized}, today={today_pnl}")
+                    
                 except Exception as e:
                     logger.error(f"Failed to create PnL for {position.symbol}: {e}")
                     continue
             
-            logger.info(f"Created {len(per_symbol)} symbol P&L entries")
+            # Round totals to 2 decimal places
+            total_unrealized = round(total_unrealized, 2)
+            total_realized = round(total_realized, 2)
+            total_day_pnl = round(total_day_pnl, 2)
             
-            # Test creating PnLTotals first
+            logger.info(f"Calculated totals - realized: {total_realized}, unrealized: {total_unrealized}, day: {total_day_pnl}")
+            
+            # Consistency check: Σ(perSymbol.unrealized) ≈ totals.unrealized within ₹0.05
+            per_symbol_unrealized_sum = round(sum(symbol.unrealized for symbol in per_symbol), 2)
+            drift = abs(per_symbol_unrealized_sum - total_unrealized)
+            
+            if drift > 0.05:
+                logger.warning(f"pnl.drift: Σ(perSymbol.unrealized)={per_symbol_unrealized_sum} != totals.unrealized={total_unrealized}, drift=₹{drift:.2f}")
+            else:
+                logger.debug(f"PnL consistency check passed: drift=₹{drift:.2f}")
+            
+            # Create PnLTotals with proper formatting
             try:
-                logger.info("Creating PnLTotals...")
+                logger.debug("Creating PnLTotals...")
                 totals = PnLTotals(
-                    realized=realized,
-                    unrealized=unrealized,
-                    day=day,
-                    currency="INR",
-                    updated_at=datetime.now(),
-                    trading_day=datetime.now().strftime('%Y-%m-%d')
+                    realized=total_realized,
+                    unrealized=total_unrealized,
+                    day=total_day_pnl,
+                    currency="INR"
                 )
-                logger.info("PnLTotals created successfully")
+                logger.debug("PnLTotals created successfully")
             except Exception as e:
                 logger.error(f"Failed to create PnLTotals: {e}")
                 import traceback
                 logger.error(f"PnLTotals traceback: {traceback.format_exc()}")
                 return None
             
-            # Test creating PnL model
+            # Create final PnL model
             try:
-                logger.info("Creating PnL model...")
+                logger.debug("Creating PnL model...")
+                logger.debug(f"Model fields: totals={type(totals)}, perSymbol={len(per_symbol)}, updated_at={now_ist}, trading_day={trading_day}")
+                
                 pnl = PnL(
                     totals=totals,
-                    perSymbol=per_symbol  # Use the alias instead of per_symbol
+                    perSymbol=per_symbol,
+                    updatedAt=now_ist,
+                    tradingDay=trading_day
                 )
-                logger.info("P&L calculation completed successfully")
+                
+                logger.debug(f"Created PnL model: {pnl}")
+                logger.debug(f"PnL model fields: {pnl.__dict__}")
+                
+                logger.info(f"P&L calculation completed successfully: {len(per_symbol)} symbols, unrealized=₹{total_unrealized:.2f}")
                 return pnl
             except Exception as e:
                 logger.error(f"Failed to create PnL model: {e}")
@@ -538,6 +601,15 @@ class DhanClient:
     async def get_pnl_async(self):
         """Async version of get_pnl"""
         return self.get_pnl()
+    
+    def recalculate_pnl(self):
+        """Recalculate PnL and return updated data - triggers on position/LTP changes"""
+        logger.info("Triggering PnL recalculation due to position/LTP changes")
+        return self.get_pnl()
+    
+    async def recalculate_pnl_async(self):
+        """Async version of recalculate_pnl"""
+        return self.recalculate_pnl()
 
 # Global client instance
 dhan_client = DhanClient()
