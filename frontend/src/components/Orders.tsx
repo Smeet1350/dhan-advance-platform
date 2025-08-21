@@ -1,7 +1,6 @@
 import React from 'react';
-import { motion } from 'framer-motion';
 import { useOrders } from '../api';
-import type { Order } from '../api';
+import { VirtualizedOrdersTable } from './VirtualizedTables';
 
 const Orders: React.FC = () => {
   const { data: ordersData, isLoading, error, refetch } = useOrders();
@@ -28,7 +27,7 @@ const Orders: React.FC = () => {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
             </svg>
           </div>
-          <h3 className="text-2xl font-bold text-white mb-3">Error Loading Orders</h3>
+          <h3 className="text-3xl font-bold text-white mb-3">Error Loading Orders</h3>
           <p className="text-blue-200 mb-6">{error.message}</p>
           <button
             onClick={() => refetch()}
@@ -48,58 +47,15 @@ const Orders: React.FC = () => {
         <div className="relative text-center">
           <div className="w-20 h-20 bg-gradient-to-br from-gray-500 to-blue-600 rounded-full flex items-center justify-center mx-auto mb-6 shadow-lg">
             <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2zm0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
             </svg>
           </div>
-          <h3 className="text-2xl font-bold text-white mb-3">No Orders Found</h3>
+          <h3 className="text-3xl font-bold text-white mb-3">No Orders Found</h3>
           <p className="text-blue-200">Start trading to see your order history.</p>
         </div>
       </div>
     );
   }
-
-  const formatCurrency = (value: number) => {
-    return new Intl.NumberFormat('en-IN', {
-      style: 'currency',
-      currency: 'INR',
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0,
-    }).format(value);
-  };
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'OPEN':
-        return 'bg-blue-500/20 text-blue-300 border-blue-400/40';
-      case 'COMPLETED':
-        return 'bg-green-500/20 text-green-300 border-green-400/40';
-      case 'CANCELLED':
-        return 'bg-red-500/20 text-red-300 border-red-400/40';
-      case 'REJECTED':
-        return 'bg-red-500/20 text-red-300 border-red-400/40';
-      default:
-        return 'bg-gray-500/20 text-gray-300 border-gray-400/40';
-    }
-  };
-
-  const getSideColor = (side: string) => {
-    return side === 'LONG' 
-      ? 'bg-green-500/20 text-green-300 border-green-400/40' 
-      : 'bg-red-500/20 text-red-300 border-red-400/40';
-  };
-
-  const getOrderTypeColor = (type: string) => {
-    switch (type) {
-      case 'MARKET':
-        return 'bg-purple-500/20 text-purple-300 border-purple-400/40';
-      case 'LIMIT':
-        return 'bg-orange-500/20 text-orange-300 border-orange-400/40';
-      case 'STOP_LOSS':
-        return 'bg-red-500/20 text-red-300 border-red-400/40';
-      default:
-        return 'bg-gray-500/20 text-gray-300 border-gray-400/40';
-    }
-  };
 
   const totalOrders = ordersData.length;
   const openOrders = ordersData.filter(order => order.status === 'PENDING').length;
@@ -145,76 +101,10 @@ const Orders: React.FC = () => {
 
       {/* Orders Table */}
       <div className="relative p-8">
-        <div className="relative bg-white/5 backdrop-blur-xl rounded-2xl border border-white/20 overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead className="bg-white/5 border-b border-white/20">
-                <tr>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Order ID</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Symbol</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Side</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Type</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Price</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Quantity</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Filled</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Status</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Placed At</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/10">
-                {ordersData.map((order: Order, index: number) => (
-                  <motion.tr
-                    key={order.order_id}
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ duration: 0.3, delay: index * 0.05 }}
-                    className="hover:bg-white/5 transition-all duration-200 group"
-                  >
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-white group-hover:text-blue-200 transition-colors">
-                        {order.order_id}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-200">
-                      {order.symbol}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`inline-flex px-3 py-1 text-xs font-semibold rounded-full border ${getSideColor(order.side)}`}>
-                        {order.side}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`inline-flex px-3 py-1 text-xs font-semibold rounded-full border ${getOrderTypeColor(order.type)}`}>
-                        {order.type}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-200">
-                      {formatCurrency(order.price)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-200">
-                      {order.qty.toLocaleString()}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-200">
-                      {order.filled_qty.toLocaleString()}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`inline-flex px-3 py-1 text-xs font-semibold rounded-full border ${getStatusColor(order.status)}`}>
-                        {order.status}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-200">
-                      {new Date(order.placed_at).toLocaleString('en-IN', { 
-                        timeZone: 'Asia/Kolkata',
-                        dateStyle: 'short',
-                        timeStyle: 'short'
-                      })}
-                    </td>
-                  </motion.tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <VirtualizedOrdersTable 
+          data={ordersData} 
+          onRowClick={(order) => console.log('Order clicked:', order)}
+        />
       </div>
     </div>
   );

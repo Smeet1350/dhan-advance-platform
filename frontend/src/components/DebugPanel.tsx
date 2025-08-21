@@ -141,26 +141,26 @@ const DebugPanel: React.FC = () => {
     try {
       // Fetch debug status
       const statusResponse = await api.fetch('/debug/status');
-      if (statusResponse.ok) {
-        setDebugStatus(statusResponse.data);
+      if ((statusResponse as any).ok) {
+        setDebugStatus((statusResponse as any).data);
       }
 
       // Fetch circuit breaker status
       const circuitResponse = await api.fetch('/debug/circuit-breaker/status');
-      if (circuitResponse.ok) {
-        setCircuitStatus(circuitResponse.data);
+      if ((circuitResponse as any).ok) {
+        setCircuitStatus((circuitResponse as any).data);
       }
 
       // Fetch performance metrics
       const perfResponse = await api.fetch('/debug/performance/metrics');
-      if (perfResponse.ok) {
-        setPerformanceMetrics(perfResponse.data);
+      if ((perfResponse as any).ok) {
+        setPerformanceMetrics((perfResponse as any).data);
       }
 
       // Fetch WebSocket events
       const eventsResponse = await api.fetch('/debug/websocket/events?limit=20');
-      if (eventsResponse.ok) {
-        setWsEvents(eventsResponse.data.events);
+      if ((eventsResponse as any).ok) {
+        setWsEvents((eventsResponse as any).data.events);
       }
 
       setLastRefresh(new Date());
@@ -176,7 +176,7 @@ const DebugPanel: React.FC = () => {
       const response = await api.fetch(`/debug/circuit-breaker/reset?service=${service}`, {
         method: 'POST'
       });
-      if (response.ok) {
+      if ((response as any).ok) {
         // Refresh data
         await fetchDebugData();
       }
@@ -190,9 +190,8 @@ const DebugPanel: React.FC = () => {
       const response = await api.fetch('/debug/websocket/test', {
         method: 'POST'
       });
-      if (response.ok) {
-        // Refresh data
-        await fetchDebugData();
+      if ((response as any).ok) {
+        console.log('Test message sent successfully');
       }
     } catch (error) {
       console.error('Error testing WebSocket:', error);

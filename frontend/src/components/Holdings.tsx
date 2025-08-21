@@ -1,7 +1,6 @@
 import React from 'react';
-import { motion } from 'framer-motion';
 import { useHoldings } from '../api';
-import type { Holding } from '../api';
+import { VirtualizedHoldingsTable } from './VirtualizedTables';
 
 const Holdings: React.FC = () => {
   const { data: holdingsData, isLoading, error, refetch } = useHoldings();
@@ -101,64 +100,10 @@ const Holdings: React.FC = () => {
 
       {/* Holdings Table */}
       <div className="relative p-8">
-        <div className="relative bg-white/5 backdrop-blur-xl rounded-2xl border border-white/20 overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead className="bg-white/5 border-b border-white/20">
-                <tr>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Symbol</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">ISIN</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Quantity</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Avg Price</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">LTP</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Market Value</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-blue-200 uppercase tracking-wider">Day Change</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/10">
-                {holdingsData.map((holding: Holding, index: number) => (
-                  <motion.tr
-                    key={holding.isin}
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ duration: 0.3, delay: index * 0.05 }}
-                    className="hover:bg-white/5 transition-all duration-200 group"
-                  >
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-white group-hover:text-blue-200 transition-colors">
-                        {holding.symbol}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-200">
-                      {holding.isin}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-200">
-                      {holding.qty.toLocaleString()}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-200">
-                      {formatCurrency(holding.avg_price)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-200">
-                      {formatCurrency(holding.ltp)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-white font-medium">
-                      {formatCurrency(holding.value)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`text-sm font-medium ${
-                        (holding.ltp - holding.avg_price) > 0 
-                          ? 'text-green-400' 
-                          : 'text-red-400'
-                      }`}>
-                        {((holding.ltp - holding.avg_price) / holding.avg_price * 100).toFixed(2)}%
-                      </span>
-                    </td>
-                  </motion.tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <VirtualizedHoldingsTable 
+          data={holdingsData} 
+          onRowClick={(holding) => console.log('Holding clicked:', holding)}
+        />
       </div>
     </div>
   );

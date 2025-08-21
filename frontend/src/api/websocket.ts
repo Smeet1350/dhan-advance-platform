@@ -31,7 +31,7 @@ class WebSocketClientImpl implements WebSocketClient {
   async connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
-        const wsUrl = config.api.baseURL.replace('http', 'ws') + '/ws';
+        const wsUrl = config.WS_URL;
         console.log('🔌 Connecting to WebSocket:', wsUrl);
         
         this.ws = new WebSocket(wsUrl);

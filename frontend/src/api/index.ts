@@ -121,8 +121,8 @@ export interface APIResponse<T> {
 
 // REST API Functions
 export const api = {
-  async fetch<T>(endpoint: string): Promise<T> {
-    const response = await fetch(`${API_BASE}${endpoint}`);
+  async fetch<T>(endpoint: string, init?: RequestInit): Promise<T> {
+    const response = await fetch(`${API_BASE}${endpoint}`, init);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }

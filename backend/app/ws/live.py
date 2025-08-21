@@ -6,10 +6,13 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Set
 from enum import Enum
 import structlog
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket, WebSocketDisconnect, APIRouter
 from app.services.dhan_client import dhan_client
 
 logger = structlog.get_logger()
+
+# Create FastAPI router
+router = APIRouter()
 
 class MessageType(str, Enum):
     HELLO = "hello"
@@ -505,6 +508,19 @@ class WebSocketManager:
 # Global WebSocket manager instance
 ws_manager = WebSocketManager()
 
+# Startup and shutdown events
+async def startup():
+    """Startup event handler"""
+    logger.info("Starting WebSocket manager...")
+    await ws_manager.start_polling()
+
+async def shutdown():
+    """Shutdown event handler"""
+    logger.info("Stopping WebSocket manager...")
+    await ws_manager.stop_polling()
+
+# Add WebSocket endpoint to router
+@router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time data streaming"""
     client_id = f"client_{len(ws_manager.active_connections) + 1}"
@@ -543,14 +559,3 @@ async def websocket_endpoint(websocket: WebSocket):
         
     finally:
         await ws_manager.disconnect(client_id)
-
-# Startup and shutdown events
-async def startup():
-    """Startup event handler"""
-    logger.info("Starting WebSocket manager...")
-    await ws_manager.start_polling()
-
-async def shutdown():
-    """Shutdown event handler"""
-    logger.info("Stopping WebSocket manager...")
-    await ws_manager.stop_polling()

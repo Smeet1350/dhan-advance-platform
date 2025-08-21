@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api';
-import { DataMerger } from '../api/merge';
 import { OrderModal } from './OrderModal';
 import { ConfirmationModal } from './ConfirmationModal';
 import { tradingApi } from '../api/trading';

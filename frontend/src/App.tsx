@@ -6,6 +6,7 @@ import Holdings from './components/Holdings';
 import Orders from './components/Orders';
 import Trades from './components/Trades';
 import DebugPanel from './components/DebugPanel';
+import PerformanceOptimizer from './components/PerformanceOptimizer';
 import { useWebSocket, ConnectionState } from './api';
 
 function App() {
@@ -14,7 +15,8 @@ function App() {
   });
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white">
+    <PerformanceOptimizer enableMonitoring={true} enableLazyLoading={true} enableVirtualization={true}>
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white">
       {/* Animated Background */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
         <div className="absolute -top-40 -right-40 w-80 h-80 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse-slow"></div>
@@ -191,7 +193,8 @@ function App() {
 
       {/* Debug Panel */}
       <DebugPanel />
-    </div>
+      </div>
+    </PerformanceOptimizer>
   );
 }
 

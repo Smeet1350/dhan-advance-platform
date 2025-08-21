@@ -1,8 +1,11 @@
 // Frontend Configuration
 export const config = {
   // API Configuration
-  API_BASE: 'http://localhost:8003',
-  WS_URL: 'ws://localhost:8003/ws',
+  API_BASE: 'http://localhost:8001',
+  WS_URL: 'ws://localhost:8001/ws',
+  api: {
+    baseURL: 'http://localhost:8001'
+  },
   
   // WebSocket Configuration
   WS_RECONNECT_INTERVAL: 1000,
@@ -23,3 +26,7 @@ export const config = {
   MAX_DAILY_LOSS: 100000,
   POSITION_LIMIT_WARNING: 0.8, // 80% of max
 };
+
+// Export individual values for backward compatibility
+export const API_BASE = config.API_BASE;
+export const WS_URL = config.WS_URL;
